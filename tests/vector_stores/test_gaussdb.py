@@ -28,8 +28,7 @@ def make_gaussdb(**kwargs):
     config.update(kwargs)
 
     with patch.object(GaussDB, "_create_connection_pool", return_value=mock_pool):
-        with patch.object(GaussDB, "_probe_capabilities"):
-            db = GaussDB(**config)
+        db = GaussDB(**config)
     return db, mock_pool, mock_conn, mock_cursor
 
 
@@ -275,19 +274,18 @@ def test_vector_store_config_and_factory_register_gaussdb():
 def test_factory_creates_gaussdb_instance():
     db, mock_pool, _, _ = make_gaussdb()
     with patch.object(GaussDB, "_create_connection_pool", return_value=mock_pool):
-        with patch.object(GaussDB, "_probe_capabilities"):
-            created = VectorStoreFactory.create(
-                "gaussdb",
-                {
-                    "collection_name": "test_collection",
-                    "embedding_model_dims": 3,
-                    "auto_create": False,
-                    "host": "localhost",
-                    "port": 5432,
-                    "user": "test",
-                    "password": "test",
-                },
-            )
+        created = VectorStoreFactory.create(
+            "gaussdb",
+            {
+                "collection_name": "test_collection",
+                "embedding_model_dims": 3,
+                "auto_create": False,
+                "host": "localhost",
+                "port": 5432,
+                "user": "test",
+                "password": "test",
+            },
+        )
 
     assert isinstance(created, GaussDB)
     assert created.collection_name == db.collection_name
@@ -356,7 +354,7 @@ def test_create_col_does_not_accept_alternate_collection_name():
     with pytest.raises(TypeError):
         db.create_col(name="other_collection")
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="vector_size must be >= 1"):
         db.create_col("other_collection")
 
 
@@ -370,25 +368,6 @@ def test_distributed_create_col_generates_hash_distribution_clauses():
     assert db.distribution_mode == "hash"
     assert 'DISTRIBUTE BY HASH ("id")' in sql
     assert 'DISTRIBUTE BY HASH ("collection_name")' in sql
-
-
-# ============================================================
-# Capability probe tests
-# ============================================================
-
-
-def test_capability_probe_sets_vector_index_maintenance_work_mem():
-    db, _, _, mock_cursor = make_gaussdb()
-    mock_cursor.fetchone.return_value = ("on",)
-
-    db._probe_capabilities()
-
-    sql = executed_sql(mock_cursor)
-    assert "SHOW enable_vectordb" in sql
-    assert "CREATE INDEX" in sql
-    assert "INSERT INTO" in sql
-    assert "text_lemmatized ### %s AS score" in sql
-    mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("128MB",))
 
 
 def test_set_vector_index_maintenance_work_mem_skips_when_current_is_higher():
@@ -412,50 +391,6 @@ def test_set_vector_index_maintenance_work_mem_raises_default_for_high_dim_gsdis
     mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("2GB",))
 
 
-def test_capability_probe_uses_distributed_probe_table_suffix():
-    db, _, _, mock_cursor = make_gaussdb(deployment_mode="distributed")
-    mock_cursor.fetchone.return_value = ("on",)
-
-    db._probe_capabilities()
-
-    sql = executed_sql(mock_cursor)
-    assert 'DISTRIBUTE BY HASH ("id")' in sql
-
-
-def test_capability_probe_raises_on_jsonb_failure():
-    db, _, _, mock_cursor = make_gaussdb()
-    mock_cursor.fetchone.return_value = ("on",)
-
-    def execute_side_effect(sql, *args):
-        if "CREATE TABLE" in str(sql) and "payload JSONB" in str(sql):
-            raise Exception("jsonb type unsupported")
-
-    mock_cursor.execute.side_effect = execute_side_effect
-
-    with pytest.raises(Exception, match="jsonb type unsupported"):
-        db._probe_capabilities()
-
-
-def test_capability_probe_keeps_json_filters_on_expression_index_failure(caplog):
-    db, _, _, mock_cursor = make_gaussdb()
-    mock_cursor.fetchone.return_value = ("on",)
-    caplog.set_level(logging.WARNING, logger="mem0.vector_stores.gaussdb")
-
-    def execute_side_effect(sql, *args):
-        if "payload->>'user_id'" in str(sql):
-            raise Exception("expression index unsupported")
-
-    mock_cursor.execute.side_effect = execute_side_effect
-
-    db._probe_capabilities()
-
-    assert db.payload_storage_mode == "jsonb"
-    assert db.filter_storage_mode == "json_expression"
-    assert db.metadata_column_mode == "jsonb"
-    assert db.capabilities.expression_index is False
-    assert "metadata filters remain available without expression indexes" in caplog.text
-
-
 def test_filter_index_creation_failure_warns_and_keeps_filter_mode(caplog):
     db, _, _, mock_cursor = make_gaussdb()
     caplog.set_level(logging.WARNING, logger="mem0.vector_stores.gaussdb")
@@ -473,22 +408,27 @@ def test_filter_index_creation_failure_warns_and_keeps_filter_mode(caplog):
     assert "Filter index creation failed for key user_id" in caplog.text
 
 
-def test_capability_probe_bm25_score_failure_disables_bm25():
-    db, _, _, mock_cursor = make_gaussdb()
-    mock_cursor.fetchone.return_value = ("on",)
+def test_constructor_uses_static_capability_assumptions_for_centralized():
+    db, *_ = make_gaussdb(deployment_mode="centralized")
 
-    def execute_side_effect(sql, *args):
-        if "SELECT text_lemmatized ###" in str(sql):
-            raise Exception("operator ### unsupported")
+    assert db.capabilities.vector_enabled is True
+    assert db.capabilities.floatvector is True
+    assert db.capabilities.vector_index is True
+    assert db.capabilities.bm25 is True
+    assert db.capabilities.jsonb is True
+    assert db.capabilities.uuid is True
+    assert db.capabilities.expression_index is True
+    assert db.capabilities.deployment_mode == "centralized"
+    assert db.capabilities.distribution_mode == "none"
 
-    mock_cursor.execute.side_effect = execute_side_effect
 
-    db._probe_capabilities()
+def test_constructor_uses_static_capability_assumptions_for_distributed():
+    db, *_ = make_gaussdb(deployment_mode="distributed", embedding_model_dims=512)
 
-    sql = executed_sql(mock_cursor)
-    assert "ROLLBACK TO SAVEPOINT" in sql
     assert db.bm25_enabled is False
-    assert db.metrics["gaussdb_fallback_count"] == 1
+    assert db.capabilities.bm25 is False
+    assert db.capabilities.deployment_mode == "distributed"
+    assert db.capabilities.distribution_mode == "hash"
 
 
 # ============================================================
@@ -778,12 +718,12 @@ def test_search_declared_numeric_range_uses_typed_numeric_cast():
 
     sql = executed_sql(mock_cursor)
     params = mock_cursor.execute.call_args.args[1]
-    assert "CASE WHEN jsonb_typeof(payload->'priority') = 'number'" in sql
-    assert "THEN CAST(payload->>'priority' AS DOUBLE PRECISION) END >= %s" in sql
-    assert "THEN CAST(payload->>'priority' AS DOUBLE PRECISION) END < %s" in sql
+    assert "CASE WHEN jsonb_typeof(payload->%s) = 'number'" in sql
+    assert "THEN CAST(payload->>%s AS DOUBLE PRECISION) END >= %s" in sql
+    assert "THEN CAST(payload->>%s AS DOUBLE PRECISION) END < %s" in sql
     assert params[1] == "u1"
-    assert params[2] == 3
-    assert params[3] == 7
+    assert params[2:5] == ("priority", "priority", 3)
+    assert params[5:8] == ("priority", "priority", 7)
 
 
 def test_list_declared_datetime_range_uses_timestamptz_cast_and_guard():
@@ -796,12 +736,15 @@ def test_list_declared_datetime_range_uses_timestamptz_cast_and_guard():
 
     sql = executed_sql(mock_cursor)
     params = mock_cursor.execute.call_args.args[1]
-    assert "CASE WHEN jsonb_typeof(payload->'created_at') = 'string'" in sql
-    assert "payload->>'created_at' ~ %s" in sql
-    assert "THEN CAST(payload->>'created_at' AS TIMESTAMPTZ) END < %s" in sql
-    assert params[0].startswith("^\\d{4}-\\d{2}-\\d{2}T")
-    assert params[1] == "2026-01-01T00:00:00Z"
-    assert params[2] == 100
+    assert "CASE WHEN jsonb_typeof(payload->%s) = 'string'" in sql
+    assert "payload->>%s ~ %s" in sql
+    assert "THEN CAST(payload->>%s AS TIMESTAMPTZ) END < %s" in sql
+    assert params[0] == "created_at"
+    assert params[1] == "created_at"
+    assert params[2].startswith("^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}T")
+    assert params[3] == "created_at"
+    assert params[4] == "2026-01-01T00:00:00Z"
+    assert params[5] == 100
 
 
 def test_list_declared_datetime_range_with_multiple_bounds_repeats_regex_params():
@@ -819,14 +762,30 @@ def test_list_declared_datetime_range_with_multiple_bounds_repeats_regex_params(
         }
     )
 
-    sql = executed_sql(mock_cursor)
     params = mock_cursor.execute.call_args.args[1]
-    assert sql.count("payload->>'created_at' ~ %s") == 2
-    assert params[0].startswith("^\\d{4}-\\d{2}-\\d{2}T")
-    assert params[1] == "2026-01-01T00:00:00Z"
-    assert params[2].startswith("^\\d{4}-\\d{2}-\\d{2}T")
-    assert params[3] == "2026-12-31T00:00:00Z"
-    assert params[4] == 100
+    assert params[0:5] == (
+        "created_at",
+        "created_at",
+        params[2],
+        "created_at",
+        "2026-01-01T00:00:00Z",
+    )
+    assert params[5:10] == (
+        "created_at",
+        "created_at",
+        params[7],
+        "created_at",
+        "2026-12-31T00:00:00Z",
+    )
+    assert params[2] == params[7]
+
+    sql = executed_sql(mock_cursor)
+    assert sql.count("payload->>%s ~ %s") == 2
+    assert params[2].startswith("^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}T")
+    assert params[4] == "2026-01-01T00:00:00Z"
+    assert params[7].startswith("^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}T")
+    assert params[9] == "2026-12-31T00:00:00Z"
+    assert params[10] == 100
 
 
 def test_range_on_non_range_declared_type_warns_and_falls_back(caplog):
@@ -857,27 +816,6 @@ def test_constructor_allows_unscoped_reads_by_default():
 
     assert db.require_scoped_filters is False
     assert db.search("hello", [0.1, 0.2, 0.3], filters={"category": "test"}) == []
-
-
-def test_constructor_warns_when_server_encoding_is_not_utf8(caplog):
-    caplog.set_level(logging.WARNING, logger="mem0.vector_stores.gaussdb")
-    db, _, mock_conn, _ = make_gaussdb()
-    mock_conn.get_parameter_status.return_value = "SQL_ASCII"
-
-    db._warn_if_server_encoding_is_not_utf8()
-
-    assert "designed and validated for UTF8 databases" in caplog.text
-    assert "server_encoding=SQL_ASCII" in caplog.text
-
-
-def test_constructor_does_not_warn_when_server_encoding_is_utf8(caplog):
-    caplog.set_level(logging.WARNING, logger="mem0.vector_stores.gaussdb")
-    db, _, mock_conn, _ = make_gaussdb()
-    mock_conn.get_parameter_status.return_value = "UTF8"
-
-    db._warn_if_server_encoding_is_not_utf8()
-
-    assert "server_encoding" not in caplog.text
 
 
 def test_constructor_accepts_metadata_schema():
@@ -1452,55 +1390,6 @@ def test_validate_positive_int_and_choice_reject_invalid_values():
         GaussDB._validate_choice("bad", "vector_metric", {"cosine", "l2"})
 
 
-def test_warn_if_server_encoding_reads_parameter_status_and_warns(caplog):
-    db, mock_pool, mock_conn, mock_cursor = make_gaussdb()
-    mock_conn.get_parameter_status.return_value = "SQL_ASCII"
-
-    with caplog.at_level(logging.WARNING):
-        db._warn_if_server_encoding_is_not_utf8()
-
-    assert "server_encoding=SQL_ASCII" in caplog.text
-    mock_pool.putconn.assert_called_with(mock_conn)
-    mock_cursor.execute.assert_not_called()
-
-
-def test_warn_if_server_encoding_falls_back_to_show_and_handles_unknown(caplog):
-    db, mock_pool, mock_conn, mock_cursor = make_gaussdb()
-    mock_conn.get_parameter_status.return_value = None
-    mock_cursor.fetchone.return_value = (None,)
-
-    with caplog.at_level(logging.WARNING):
-        db._warn_if_server_encoding_is_not_utf8()
-
-    assert "Unable to determine GaussDB server_encoding" in caplog.text
-    assert "SHOW server_encoding" in executed_sql(mock_cursor)
-    mock_pool.putconn.assert_called_with(mock_conn)
-
-
-def test_warn_if_server_encoding_handles_probe_exception(caplog):
-    db, mock_pool, mock_conn, mock_cursor = make_gaussdb()
-    mock_conn.get_parameter_status.side_effect = RuntimeError("boom")
-
-    with caplog.at_level(logging.WARNING):
-        db._warn_if_server_encoding_is_not_utf8()
-
-    assert "Unable to verify GaussDB server_encoding" in caplog.text
-    mock_conn.rollback.assert_called()
-    mock_pool.putconn.assert_called_with(mock_conn)
-
-
-def test_warn_if_server_encoding_always_returns_connection_on_late_warning_path(caplog):
-    db, mock_pool, mock_conn, mock_cursor = make_gaussdb()
-    mock_conn.get_parameter_status.return_value = None
-    mock_cursor.fetchone.return_value = ("SQL_ASCII",)
-
-    with caplog.at_level(logging.WARNING):
-        db._warn_if_server_encoding_is_not_utf8()
-
-    assert "server_encoding=SQL_ASCII" in caplog.text
-    mock_pool.putconn.assert_called_with(mock_conn)
-
-
 def test_index_name_hashes_when_too_long():
     name = GaussDB._index_name("a" * 70, "vector_idx")
 
@@ -1874,7 +1763,7 @@ def test_update_delete_get_list_reset_and_col_helpers():
     cur = MagicMock()
     cur.fetchone.side_effect = [("id1", '{"a":1}'), None, (5,)]
     cur.fetchall.side_effect = [
-        [("table_a",), ("table_a_schema_meta",), ("mem0_gdb_probe_x",), ("table_b",)],
+        [("table_a",), ("table_a_schema_meta",), ("table_b",)],
         [("idx_a",), ("idx_b",)],
         [("id2", '{"b":2}')],
     ]
@@ -1948,8 +1837,8 @@ def test_build_filter_expression_and_field_helpers_cover_error_and_edge_paths():
     assert db._field_in_expression("category", [], negate=True) == ("1 = 1", [])
 
     expr, params = db._field_sql("category")
-    assert expr == "payload->>'category'"
-    assert params == []
+    assert expr == "payload->>%s"
+    assert params == ["category"]
 
     with pytest.raises(ValueError):
         db._build_presence_filter("category", {"exists": True, "missing": False})
@@ -1991,8 +1880,8 @@ def test_init_auto_create_calls_create_col_when_collection_missing():
     mock_pool.getconn.return_value = mock_conn
 
     with patch.object(GaussDB, "_create_connection_pool", return_value=mock_pool), patch.object(
-        GaussDB, "_probe_capabilities"
-    ), patch.object(GaussDB, "list_cols", return_value=[]), patch.object(GaussDB, "create_col") as create_col:
+        GaussDB, "list_cols", return_value=[]
+    ), patch.object(GaussDB, "create_col") as create_col:
         GaussDB(collection_name="test_collection", embedding_model_dims=3, auto_create=True)
 
     create_col.assert_called_once()
@@ -2028,128 +1917,6 @@ def test_build_dsn_does_not_duplicate_ssl_when_already_present():
     dsn = db._build_dsn()
     assert dsn.count("sslmode=") == 1
     assert dsn.count("sslrootcert=") == 1
-
-
-def test_probe_capabilities_handles_enable_vectordb_read_failure():
-    db, *_ = make_gaussdb()
-    db.bm25_enabled = False
-    with patch.object(db, "_run_with_retry", side_effect=lambda op, fn: fn()), patch.object(
-        db, "_set_vector_index_maintenance_work_mem"
-    ), patch.object(
-        db, "_get_cursor"
-    ) as get_cursor:
-        startup_cm = MagicMock()
-        startup_cur = MagicMock()
-        main_cm = MagicMock()
-        main_cur = MagicMock()
-        cleanup_cm = MagicMock()
-        cleanup_cur = MagicMock()
-        startup_cm.__enter__.return_value = startup_cur
-        main_cm.__enter__.return_value = main_cur
-        cleanup_cm.__enter__.return_value = cleanup_cur
-        get_cursor.side_effect = [startup_cm, main_cm, cleanup_cm]
-        startup_cur.execute.side_effect = RuntimeError("show failed")
-        main_cur.execute.side_effect = lambda *args, **kwargs: None
-
-        db._probe_capabilities()
-
-    assert db.capabilities.vector_enabled is True
-    assert "DROP TABLE IF EXISTS" in executed_sql(cleanup_cur)
-
-
-def test_probe_capabilities_raises_when_enable_vectordb_is_off():
-    db, *_ = make_gaussdb()
-    with patch.object(db, "_run_with_retry", side_effect=lambda op, fn: fn()), patch.object(
-        db, "_get_cursor"
-    ) as get_cursor:
-        startup_cm = MagicMock()
-        startup_cur = MagicMock()
-        cleanup_cm = MagicMock()
-        cleanup_cur = MagicMock()
-        startup_cm.__enter__.return_value = startup_cur
-        cleanup_cm.__enter__.return_value = cleanup_cur
-        get_cursor.side_effect = [startup_cm, cleanup_cm]
-        startup_cur.fetchone.return_value = ("off",)
-
-        with pytest.raises(RuntimeError, match="enable_vectordb is not enabled"):
-            db._probe_capabilities()
-
-
-def test_probe_capabilities_raises_friendly_dimension_error():
-    db, *_ = make_gaussdb(embedding_model_dims=1536)
-    db.bm25_enabled = False
-    with patch.object(db, "_run_with_retry", side_effect=lambda op, fn: fn()), patch.object(
-        db, "_get_cursor"
-    ) as get_cursor:
-        startup_cm = MagicMock()
-        startup_cur = MagicMock()
-        main_cm = MagicMock()
-        main_cur = MagicMock()
-        cleanup_cm = MagicMock()
-        cleanup_cur = MagicMock()
-        startup_cm.__enter__.return_value = startup_cur
-        main_cm.__enter__.return_value = main_cur
-        cleanup_cm.__enter__.return_value = cleanup_cur
-        get_cursor.side_effect = [startup_cm, main_cm, cleanup_cm]
-        startup_cur.fetchone.return_value = ("on",)
-        main_cur.execute.side_effect = RuntimeError("The vector exceeds the max dimension.")
-
-        with pytest.raises(RuntimeError, match="vector dimension limit exceeded"):
-            db._probe_capabilities()
-
-
-def test_probe_capabilities_outer_bm25_exception_disables_bm25(caplog):
-    db, *_ = make_gaussdb()
-    db.bm25_enabled = True
-    with patch.object(db, "_run_with_retry", side_effect=lambda op, fn: fn()), patch.object(
-        db, "_set_vector_index_maintenance_work_mem"
-    ), patch.object(
-        db, "_get_cursor"
-    ) as get_cursor, patch.object(db, "_create_bm25_index", side_effect=RuntimeError("bm25 exploded")):
-        startup_cm = MagicMock()
-        startup_cur = MagicMock()
-        main_cm = MagicMock()
-        main_cur = MagicMock()
-        cleanup_cm = MagicMock()
-        cleanup_cur = MagicMock()
-        startup_cm.__enter__.return_value = startup_cur
-        main_cm.__enter__.return_value = main_cur
-        cleanup_cm.__enter__.return_value = cleanup_cur
-        get_cursor.side_effect = [startup_cm, main_cm, cleanup_cm]
-        startup_cur.fetchone.return_value = ("on",)
-        main_cur.execute.side_effect = [None, None]
-
-        with caplog.at_level(logging.WARNING):
-            db._probe_capabilities()
-
-    assert db.bm25_enabled is False
-    assert "BM25 probe failed" in caplog.text
-
-
-def test_probe_capabilities_logs_cleanup_failure(caplog):
-    db, *_ = make_gaussdb()
-    with patch.object(db, "_run_with_retry", side_effect=lambda op, fn: fn()), patch.object(
-        db, "_set_vector_index_maintenance_work_mem"
-    ), patch.object(
-        db, "_get_cursor"
-    ) as get_cursor, patch.object(db, "_create_bm25_index"):
-        db.bm25_enabled = False
-        startup_cm = MagicMock()
-        startup_cur = MagicMock()
-        main_cm = MagicMock()
-        main_cur = MagicMock()
-        cleanup_cm = MagicMock()
-        startup_cm.__enter__.return_value = startup_cur
-        main_cm.__enter__.return_value = main_cur
-        cleanup_cm.__enter__.side_effect = RuntimeError("cleanup failed")
-        get_cursor.side_effect = [startup_cm, main_cm, cleanup_cm]
-        startup_cur.fetchone.return_value = ("on",)
-        main_cur.execute.side_effect = lambda *args, **kwargs: None
-
-        with caplog.at_level(logging.DEBUG):
-            db._probe_capabilities()
-
-    assert "Failed to clean up GaussDB probe table" in caplog.text
 
 
 def test_create_col_updates_distance_choice():
@@ -2232,7 +1999,7 @@ def test_build_field_filter_covers_scope_ne_nin_contains_and_list_singleton():
 
     expr, params = db._build_field_filter("title", {"contains": "100%_ok"})
     assert "LIKE %s ESCAPE '\\'" in expr
-    assert params == ["%100\\%\\_ok%"]
+    assert params == ["title", "%100\\%\\_ok%"]
 
     expr, params = db._build_field_filter("title", ["x"])
     assert expr == "payload @> %s::JSONB"
@@ -2242,8 +2009,8 @@ def test_build_field_filter_covers_scope_ne_nin_contains_and_list_singleton():
 def test_field_sql_and_in_expression_cover_json_expression_and_singletons():
     db, *_ = make_gaussdb()
     expr, params = db._field_sql("category")
-    assert expr == "payload->>'category'"
-    assert params == []
+    assert expr == "payload->>%s"
+    assert params == ["category"]
 
     expr, params = db._field_in_expression("category", ["x"], negate=True)
     assert expr == "(payload @> %s::JSONB) IS NOT TRUE"

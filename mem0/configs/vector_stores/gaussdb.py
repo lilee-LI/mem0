@@ -2,7 +2,7 @@ import os
 import re
 from typing import Any, Dict, Optional
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 _ENV_DEFAULTS = {
@@ -42,7 +42,7 @@ class GaussDBConfig(BaseModel):
     sslrootcert: Optional[str] = Field(None, description="SSL root certificate path")
     schema_name: str = Field(
         "public",
-        validation_alias=AliasChoices("schema", "schema_name"),
+        validation_alias="schema",
         serialization_alias="schema",
         description="Optional advanced schema name; defaults to public",
     )

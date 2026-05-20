@@ -80,17 +80,19 @@ config = {
 | `metadata_schema` | Optional typed metadata declarations | `{}` |
 | `sslmode` / `sslrootcert` | Optional SSL settings | `None` |
 
-## UTF8 recommendation
+## Environment prerequisites
 
-The provider assumes UTF8 as the recommended database baseline.
+GaussDB support is designed around explicit deployment prerequisites rather than runtime capability probing.
 
-Current behavior:
+Before using the provider, make sure:
 
-- all sessions set `client_encoding=UTF8`
-- initialization checks `server_encoding`
-- non-UTF8 servers trigger a warning instead of a hard startup failure
-
-For production, use a UTF8 database.
+- `enable_vectordb` is enabled
+- the database encoding is `UTF8`
+- the database runs in the O-compatible family
+  - centralized: A-compatible
+  - distributed: ORA-compatible
+- the application account has table, index, and read/write privileges
+- centralized mode is used when you need dimensions above `1024` or BM25 `keyword_search`
 
 ## Scoped filtering
 

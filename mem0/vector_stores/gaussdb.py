@@ -25,7 +25,10 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _FILTER_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _MEMORY_SETTING_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*$")
 _ISO_8601_TIMESTAMPTZ_PATTERN = (
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+    r"^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}T"
+    r"[[:digit:]]{2}:[[:digit:]]{2}:[[:digit:]]{2}"
+    r"([.][[:digit:]]+)?"
+    r"(Z|[+-][[:digit:]]{2}:[[:digit:]]{2})$"
 )
 _RETRYABLE_ERROR_FRAGMENTS = (
     "connection",
@@ -96,7 +99,6 @@ class GaussDB(VectorStoreBase):
         sslmode: Optional[str] = None,
         sslrootcert: Optional[str] = None,
         schema: str = "public",
-        schema_name: Optional[str] = None,
         deployment_mode: str = "centralized",
         vector_index_type: str = "gsdiskann",
         vector_metric: str = "cosine",
@@ -112,7 +114,7 @@ class GaussDB(VectorStoreBase):
         port = port or _first_env("GAUSSDB_PORT")
         sslmode = sslmode or _first_env("GAUSSDB_SSLMODE")
         sslrootcert = sslrootcert or _first_env("GAUSSDB_SSLROOTCERT")
-        schema = _first_env("GAUSSDB_SCHEMA") or schema_name or schema
+        schema = _first_env("GAUSSDB_SCHEMA") or schema
 
         self.database = database
         self.collection_name = self._validate_identifier(collection_name, "collection_name")
@@ -175,6 +177,13 @@ class GaussDB(VectorStoreBase):
 
         self.capabilities = CapabilityReport(
             baseline=self.gaussdb_version_baseline,
+            vector_enabled=True,
+            floatvector=True,
+            vector_index=True,
+            bm25=self.bm25_enabled,
+            jsonb=True,
+            uuid=self.id_column_type == "uuid",
+            expression_index=True,
             payload_storage_mode=self.payload_storage_mode,
             filter_storage_mode=self.filter_storage_mode,
             metadata_column_mode=self.metadata_column_mode,
@@ -189,8 +198,6 @@ class GaussDB(VectorStoreBase):
         self.schema_meta_table_name = f'{self._schema_prefix}{self._quote_identifier(f"{self.collection_name}_schema_meta")}'
 
         self.connection_pool = self._create_connection_pool()
-        self._probe_capabilities()
-        self._warn_if_server_encoding_is_not_utf8()
 
         if auto_create:
             collections = self.list_cols()
@@ -208,6 +215,8 @@ class GaussDB(VectorStoreBase):
 
     @staticmethod
     def _validate_positive_int(value: int, field_name: str) -> int:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{field_name} must be >= 1")
         if value <= 0:
             raise ValueError(f"{field_name} must be >= 1")
         return value
@@ -217,51 +226,6 @@ class GaussDB(VectorStoreBase):
         if value not in choices:
             raise ValueError(f"{field_name} must be one of {sorted(choices)}")
         return value
-
-    def _warn_if_server_encoding_is_not_utf8(self) -> None:
-        conn = self.connection_pool.getconn()
-        try:
-            server_encoding = None
-            get_parameter_status = getattr(conn, "get_parameter_status", None)
-            if callable(get_parameter_status):
-                value = get_parameter_status("server_encoding")
-                if isinstance(value, str) and value:
-                    server_encoding = value
-
-            if server_encoding is None:
-                cur = conn.cursor()
-                try:
-                    cur.execute("SHOW server_encoding")
-                    row = cur.fetchone()
-                finally:
-                    cur.close()
-                if row and row[0]:
-                    server_encoding = row[0]
-        except Exception as exc:
-            logger.warning("Unable to verify GaussDB server_encoding during initialization: %s", exc)
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            return
-        finally:
-            self.connection_pool.putconn(conn)
-
-        if not server_encoding:
-            logger.warning(
-                "Unable to determine GaussDB server_encoding during initialization. "
-                "GaussDB mem0 deployments are recommended to use UTF8 databases."
-            )
-            return
-
-        server_encoding = str(server_encoding).upper()
-        if server_encoding != "UTF8":
-            logger.warning(
-                "GaussDB mem0 deployments are designed and validated for UTF8 databases, "
-                "but detected server_encoding=%s. client_encoding remains UTF8, "
-                "and non-UTF8 databases may cause unstable text, JSON, or metadata-filter behavior.",
-                server_encoding,
-            )
 
     @classmethod
     def _validate_identifier(cls, value: str, field_name: str = "identifier") -> str:
@@ -453,9 +417,9 @@ class GaussDB(VectorStoreBase):
         # Always serialize as a plain JSON string. Avoid psycopg2's Json adapter
         # because its getquoted() uses latin-1 encoding internally, which fails
         # for non-ASCII characters. The SQL cast (::JSONB) in the query handles
-        # the type conversion on the server side, and client_encoding=UTF8
-        # ensures the raw UTF-8 bytes are transmitted correctly even when
-        # server_encoding is SQL_ASCII.
+        # the type conversion on the server side. GaussDB mem0 deployments
+        # explicitly require UTF8 databases, and client_encoding=UTF8 keeps
+        # the client-side transport aligned with that contract.
         return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
@@ -472,147 +436,6 @@ class GaussDB(VectorStoreBase):
     def _vector_literal(vector: Sequence[float]) -> str:
         return "[" + ",".join(str(float(value)) for value in vector) + "]"
 
-    def _probe_capabilities(self):
-        report = CapabilityReport(
-            baseline=self.gaussdb_version_baseline,
-            payload_storage_mode=self.payload_storage_mode,
-            filter_storage_mode=self.filter_storage_mode,
-            metadata_column_mode=self.metadata_column_mode,
-            deployment_mode=self.deployment_mode,
-            distribution_mode=self.distribution_mode,
-        )
-
-        def probe():
-            with self._get_cursor(commit=True) as cur:
-                try:
-                    cur.execute("SHOW enable_vectordb")
-                    setting = str(cur.fetchone()[0]).lower()
-                    report.vector_enabled = setting in {"on", "true", "1"}
-                except Exception:
-                    logger.debug(
-                        "Unable to read enable_vectordb; validating vector support with DDL probe", exc_info=True
-                    )
-                    report.vector_enabled = True
-                if not report.vector_enabled:
-                    raise RuntimeError("GaussDB enable_vectordb is not enabled")
-
-        self._run_with_retry("capability_probe", probe)
-
-        probe_table = f'{self._schema_prefix}{self._quote_identifier(f"mem0_gdb_probe_{uuid.uuid4().hex[:8]}")}'
-        try:
-            with self._get_cursor(commit=True) as cur:
-                cur.execute(
-                    f"""
-                    CREATE TABLE {probe_table} (
-                        id {self._id_column_sql()} PRIMARY KEY,
-                        vector FLOATVECTOR({self.embedding_model_dims}),
-                        payload {self._payload_column_sql()},
-                        text_lemmatized TEXT
-                    ) {self._create_table_suffix_sql("id")}
-                    """
-                )
-                report.floatvector = True
-                report.uuid = self.id_column_type == "uuid"
-                report.jsonb = True
-
-                index_name = self._quote_identifier(self._index_name(f"probe_{uuid.uuid4().hex[:8]}", "vector_idx"))
-                self._set_vector_index_maintenance_work_mem(cur)
-                with_clause = self._vector_index_with_clause()
-                cur.execute(
-                    f"""
-                    CREATE INDEX {index_name}
-                    ON {probe_table}
-                    USING {self.vector_index_type} (vector {self._vector_index_metric})
-                    {with_clause}
-                    """
-                )
-                report.vector_index = True
-
-                if self.bm25_enabled:
-                    bm25_enabled_before_probe = self.bm25_enabled
-                    bm25_index = self._quote_identifier(self._index_name(f"probe_{uuid.uuid4().hex[:8]}", "bm25_idx"))
-                    self._create_bm25_index(cur, probe_table, index_name=bm25_index)
-                    if bm25_enabled_before_probe and self.bm25_enabled:
-                        savepoint = self._quote_identifier(f"mem0_bm25_probe_{uuid.uuid4().hex[:8]}")
-                        cur.execute(f"SAVEPOINT {savepoint}")
-                        try:
-                            cur.execute(
-                                f"""
-                                INSERT INTO {probe_table} (id, vector, payload, text_lemmatized)
-                                VALUES (%s::{self._id_column_sql()}, %s::FLOATVECTOR, %s::{self._payload_column_sql()}, %s)
-                                """,
-                                (
-                                    str(uuid.uuid4()),
-                                    self._vector_literal([0.0] * self.embedding_model_dims),
-                                    self._payload_value({"probe": True}),
-                                    "probe memory",
-                                ),
-                            )
-                            self._apply_bm25_settings(cur)
-                            cur.execute(
-                                f"""
-                                SELECT text_lemmatized ### %s AS score
-                                FROM {probe_table}
-                                WHERE (text_lemmatized ### %s) > 0
-                                ORDER BY score DESC
-                                LIMIT 1
-                                """,
-                                ("probe", "probe"),
-                            )
-                            if cur.fetchone() is None:
-                                raise RuntimeError("GaussDB BM25 probe did not return a score")
-                            cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                            report.bm25 = True
-                        except Exception as exc:
-                            try:
-                                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                                cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                            except Exception:
-                                logger.debug("Failed to roll back BM25 score probe savepoint", exc_info=True)
-                            logger.warning("BM25 score probe failed; keyword_search will be disabled: %s", exc)
-                            self.bm25_enabled = False
-                            self._increment_metric("gaussdb_fallback_count")
-
-                expr_index = self._quote_identifier(self._index_name(f"probe_{uuid.uuid4().hex[:8]}", "user_idx"))
-                savepoint = self._quote_identifier(f"mem0_expr_idx_probe_{uuid.uuid4().hex[:8]}")
-                cur.execute(f"SAVEPOINT {savepoint}")
-                try:
-                    cur.execute(f"CREATE INDEX {expr_index} ON {probe_table} ((payload->>'user_id'))")
-                    cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                    report.expression_index = True
-                except Exception as exc:
-                    logger.warning(
-                        "JSON expression index probe failed; metadata filters remain available without expression indexes: %s",
-                        exc,
-                    )
-                    try:
-                        cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                        cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                    except Exception:
-                        logger.debug("Failed to roll back JSON expression index probe savepoint", exc_info=True)
-        except Exception as exc:
-            err_msg = str(exc).lower()
-            if "max dimension" in err_msg or ("exceeds" in err_msg and "dimension" in err_msg):
-                raise RuntimeError(
-                    f"GaussDB vector dimension limit exceeded: embedding_model_dims="
-                    f"{self.embedding_model_dims}. The server rejected the dimension. "
-                    f"Centralized + GsDiskANN supports up to 4096; gsivfflat may have lower limits. "
-                    f"Use an embedding model with fewer dimensions, or check your index type and deployment mode."
-                ) from exc
-            elif self.bm25_enabled and "bm25" in str(exc).lower():
-                logger.warning("BM25 probe failed; keyword_search will be disabled: %s", exc)
-                self.bm25_enabled = False
-                self._increment_metric("gaussdb_fallback_count")
-            else:
-                raise
-        finally:
-            try:
-                with self._get_cursor(commit=True) as cur:
-                    cur.execute(f"DROP TABLE IF EXISTS {probe_table}")
-            except Exception:
-                logger.debug("Failed to clean up GaussDB probe table %s", probe_table, exc_info=True)
-            self.capabilities = report
-
     def _ensure_schema(self, cur) -> None:
         """Create the target schema if it does not already exist (GaussDB lacks IF NOT EXISTS for CREATE SCHEMA)."""
         cur.execute(
@@ -622,9 +445,9 @@ class GaussDB(VectorStoreBase):
         if cur.fetchone()[0] == 0:
             cur.execute(f'CREATE SCHEMA "{self.schema}"')
 
-    def create_col(self, *, vector_size: int = None, distance: str = None) -> None:
+    def create_col(self, vector_size: int = None, distance: str = None) -> None:
         table = self.table_name
-        dims = vector_size or self.embedding_model_dims
+        dims = self.embedding_model_dims if vector_size is None else self._validate_positive_int(vector_size, "vector_size")
         if distance:
             self.vector_metric = self._validate_choice(distance.lower(), "distance", {"cosine", "l2"})
 
@@ -772,6 +595,7 @@ class GaussDB(VectorStoreBase):
             except Exception:
                 logger.debug("Failed to roll back optional BM25 index savepoint", exc_info=True)
             self.bm25_enabled = False
+            self.capabilities.bm25 = False
             self._increment_metric("gaussdb_fallback_count")
             logger.warning("BM25 index creation failed; keyword_search disabled", exc_info=True)
 
@@ -1020,7 +844,7 @@ class GaussDB(VectorStoreBase):
             return [
                 row[0]
                 for row in rows
-                if not str(row[0]).endswith("_schema_meta") and not str(row[0]).startswith("mem0_gdb_probe_")
+                if not str(row[0]).endswith("_schema_meta")
             ]
 
         return self._run_with_retry("list_cols", op)
@@ -1265,7 +1089,7 @@ class GaussDB(VectorStoreBase):
         if key in self._redundant_scope_columns:
             return self._quote_identifier(key), []
         self._validate_filter_key(key)
-        return f"payload->>'{key}'", []
+        return "payload->>%s", [key]
 
     def _field_exact_expression(self, key: str, value: Any, negate: bool) -> Tuple[str, List[Any]]:
         self._validate_filter_key(key)
@@ -1307,14 +1131,14 @@ class GaussDB(VectorStoreBase):
         params: List[Any] = []
         if field_type == "number":
             column_expr = (
-                f"CASE WHEN jsonb_typeof(payload->'{key}') = 'number' "
-                f"THEN CAST(payload->>'{key}' AS DOUBLE PRECISION) END"
+                "CASE WHEN jsonb_typeof(payload->%s) = 'number' "
+                "THEN CAST(payload->>%s AS DOUBLE PRECISION) END"
             )
         else:
             column_expr = (
-                f"CASE WHEN jsonb_typeof(payload->'{key}') = 'string' "
-                f"AND payload->>'{key}' ~ %s "
-                f"THEN CAST(payload->>'{key}' AS TIMESTAMPTZ) END"
+                "CASE WHEN jsonb_typeof(payload->%s) = 'string' "
+                "AND payload->>%s ~ %s "
+                "THEN CAST(payload->>%s AS TIMESTAMPTZ) END"
             )
         mapping = {
             "gt": ">",
@@ -1326,10 +1150,10 @@ class GaussDB(VectorStoreBase):
             if op_name in value:
                 if field_type == "number":
                     expressions.append(f"{column_expr} {mapping[op_name]} %s")
-                    params.append(value[op_name])
+                    params.extend([key, key, value[op_name]])
                 else:
                     expressions.append(f"{column_expr} {mapping[op_name]} %s")
-                    params.extend([_ISO_8601_TIMESTAMPTZ_PATTERN, value[op_name]])
+                    params.extend([key, key, _ISO_8601_TIMESTAMPTZ_PATTERN, key, value[op_name]])
         if not expressions:
             raise ValueError(f"Unsupported range filter for field {key!r}")
         return " AND ".join(expressions), params

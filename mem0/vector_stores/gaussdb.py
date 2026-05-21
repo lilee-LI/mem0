@@ -158,7 +158,7 @@ class GaussDB(VectorStoreBase):
         self.table_storage = "ustore"
         self.id_column_type = "uuid"
         self.gsdiskann_subgraph_count = 1
-        self.vector_index_maintenance_work_mem = "128MB"
+        self.vector_index_maintenance_work_mem = "256MB"
         self.bm25_enabled = self.deployment_mode != "distributed"
         self.bm25_ranking_metric = 0
         self.bm25_ncandidates = 128
@@ -387,6 +387,8 @@ class GaussDB(VectorStoreBase):
 
     @property
     def _vector_operator(self) -> str:
+        # In current GaussDB vector semantics, <+> maps to cosine distance.
+        # Do not assume pgvector operator meanings here.
         return "<+>" if self.vector_metric == "cosine" else "<->"
 
     @property
@@ -524,7 +526,7 @@ class GaussDB(VectorStoreBase):
 
     def _set_vector_index_maintenance_work_mem(self, cur):
         target_mem = self.vector_index_maintenance_work_mem
-        if self.embedding_model_dims > 1024 and target_mem == "128MB":
+        if self.embedding_model_dims > 1024 and target_mem == "256MB":
             target_mem = "2GB"
         if not target_mem:
             return
@@ -717,10 +719,13 @@ class GaussDB(VectorStoreBase):
                     (vector_literal, *params, top_k),
                 )
                 rows = cur.fetchall()
-            return [
-                OutputData(id=str(row[0]), score=float(row[1]), payload=self._decode_payload(row[2]))
-                for row in rows
-            ]
+            outputs = []
+            for row in rows:
+                distance = float(row[1])
+                if self.vector_metric in {"cosine", "l2"}:
+                    distance = max(0.0, distance)
+                outputs.append(OutputData(id=str(row[0]), score=distance, payload=self._decode_payload(row[2])))
+            return outputs
 
         return self._run_with_retry("search", op)
 

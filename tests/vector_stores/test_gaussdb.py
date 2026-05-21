@@ -344,7 +344,7 @@ def test_create_col_generates_ustore_vector_bm25_and_filter_indexes():
     assert "USING bm25 (text_lemmatized)" in sql
     assert "storage_type='USTORE'" in sql
     assert '("user_id")' in sql or "user_id)" in sql
-    mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("128MB",))
+    mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("256MB",))
     mock_conn.commit.assert_called()
 
 
@@ -389,6 +389,16 @@ def test_set_vector_index_maintenance_work_mem_raises_default_for_high_dim_gsdis
 
     mock_cursor.execute.assert_any_call("SHOW maintenance_work_mem")
     mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("2GB",))
+
+
+def test_set_vector_index_maintenance_work_mem_keeps_new_default_for_1024_dims():
+    db, _, _, mock_cursor = make_gaussdb(embedding_model_dims=1024)
+    mock_cursor.fetchone.return_value = ("64MB",)
+
+    db._set_vector_index_maintenance_work_mem(mock_cursor)
+
+    mock_cursor.execute.assert_any_call("SHOW maintenance_work_mem")
+    mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("256MB",))
 
 
 def test_filter_index_creation_failure_warns_and_keeps_filter_mode(caplog):
@@ -569,6 +579,15 @@ def test_search_uses_cosine_operator_and_raw_distance_score():
     assert results[0].id == "id1"
     assert results[0].score == pytest.approx(0.25)
     assert results[0].payload["data"] == "hello"
+
+
+def test_search_clamps_tiny_negative_distance_to_zero():
+    db, _, _, mock_cursor = make_gaussdb()
+    mock_cursor.fetchall.return_value = [("id1", -1.19209289550781e-07, {"data": "hello", "user_id": "u1"})]
+
+    results = db.search("hello", [0.1, 0.2, 0.3], top_k=5, filters={"user_id": "u1"})
+
+    assert results[0].score == 0.0
 
 
 def test_search_typed_bool_filter_uses_jsonb_containment():

@@ -59,7 +59,7 @@ def test_gaussdb_config_defaults():
     assert cfg.vector_index_type == "gsdiskann"
     assert cfg.vector_metric == "cosine"
     assert cfg.collection_name == "mem0"
-    assert cfg.schema == "public"
+    assert cfg.schema_name == "public"
     assert cfg.embedding_model_dims == 1536
     assert cfg.minconn == 1
     assert cfg.maxconn == 5
@@ -110,26 +110,26 @@ def test_gaussdb_config_accepts_metadata_schema():
     assert cfg.metadata_schema == {"priority": "number", "title": "text", "flag": "bool"}
 
 
-def test_gaussdb_config_accepts_custom_schema():
+def test_gaussdb_config_accepts_custom_schema_name():
     cfg = GaussDBConfig(
         host="localhost",
         port=5432,
         user="test",
         password="test",
-        schema="mem0_app",
+        schema_name="mem0_app",
     )
 
-    assert cfg.schema == "mem0_app"
+    assert cfg.schema_name == "mem0_app"
 
 
-def test_gaussdb_config_rejects_invalid_schema():
-    with pytest.raises(Exception, match="schema"):
+def test_gaussdb_config_rejects_invalid_schema_name():
+    with pytest.raises(Exception, match="schema_name"):
         GaussDBConfig(
             host="localhost",
             port=5432,
             user="test",
             password="test",
-            schema="bad-schema",
+            schema_name="bad-schema",
         )
 
 
@@ -825,9 +825,9 @@ def test_constructor_accepts_metadata_schema():
 
 
 def test_constructor_accepts_custom_schema_and_uses_qualified_names():
-    db, _, _, _ = make_gaussdb(schema="mem0_app")
+    db, _, _, _ = make_gaussdb(schema_name="mem0_app")
 
-    assert db.schema == "mem0_app"
+    assert db.schema_name == "mem0_app"
     assert db.table_name == '"mem0_app"."test_collection"'
     assert db.schema_meta_table_name == '"mem0_app"."test_collection_schema_meta"'
 
@@ -1573,7 +1573,7 @@ def test_ensure_schema_creates_when_missing():
 
     sqls = executed_sql(cur)
     assert "information_schema.schemata" in sqls
-    assert f'CREATE SCHEMA "{db.schema}"' in sqls
+    assert f'CREATE SCHEMA "{db.schema_name}"' in sqls
 
 
 def test_ensure_schema_skips_when_present():

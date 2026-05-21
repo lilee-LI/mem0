@@ -13,7 +13,7 @@ Current provider highlights:
 - typed exact metadata filtering
 - controlled typed range support for declared `number` and `datetime` fields
 - centralized BM25 `keyword_search`
-- optional custom schema support with `public` as the default
+- optional custom `schema_name` support with `public` as the default
 
 ## Driver
 
@@ -73,7 +73,7 @@ config = {
 | `deployment_mode` | `centralized` or `distributed` | `centralized` |
 | `vector_index_type` | `gsdiskann` or `gsivfflat` | `gsdiskann` |
 | `vector_metric` | `cosine` or `l2` | `cosine` |
-| `schema` | Optional advanced schema name | `public` |
+| `schema_name` | Optional advanced schema name | `public` |
 | `minconn` / `maxconn` | Connection pool bounds | `1` / `5` |
 | `auto_create` | Create collection automatically on init | `True` |
 | `require_scoped_filters` | Optionally require positive scope filters on read paths | `False` |

@@ -98,7 +98,7 @@ class GaussDB(VectorStoreBase):
         maxconn: int = 5,
         sslmode: Optional[str] = None,
         sslrootcert: Optional[str] = None,
-        schema: str = "public",
+        schema_name: str = "public",
         deployment_mode: str = "centralized",
         vector_index_type: str = "gsdiskann",
         vector_metric: str = "cosine",
@@ -114,7 +114,7 @@ class GaussDB(VectorStoreBase):
         port = port or _first_env("GAUSSDB_PORT")
         sslmode = sslmode or _first_env("GAUSSDB_SSLMODE")
         sslrootcert = sslrootcert or _first_env("GAUSSDB_SSLROOTCERT")
-        schema = _first_env("GAUSSDB_SCHEMA") or schema
+        schema_name = _first_env("GAUSSDB_SCHEMA_NAME", "GAUSSDB_SCHEMA") or schema_name
 
         self.database = database
         self.collection_name = self._validate_identifier(collection_name, "collection_name")
@@ -154,7 +154,7 @@ class GaussDB(VectorStoreBase):
 
         # Hardcoded internal defaults
         self.client_encoding = "UTF8"
-        self.schema = self._validate_identifier(schema, "schema")
+        self.schema_name = self._validate_identifier(schema_name, "schema_name")
         self.table_storage = "ustore"
         self.id_column_type = "uuid"
         self.gsdiskann_subgraph_count = 1
@@ -193,7 +193,7 @@ class GaussDB(VectorStoreBase):
         self.metrics: Dict[str, int] = {}
         self._metrics_lock = threading.Lock()
 
-        self._schema_prefix = f'"{self.schema}".'
+        self._schema_prefix = f'"{self.schema_name}".'
         self.table_name = f'{self._schema_prefix}{self._quote_identifier(self.collection_name)}'
         self.schema_meta_table_name = f'{self._schema_prefix}{self._quote_identifier(f"{self.collection_name}_schema_meta")}'
 
@@ -440,10 +440,10 @@ class GaussDB(VectorStoreBase):
         """Create the target schema if it does not already exist (GaussDB lacks IF NOT EXISTS for CREATE SCHEMA)."""
         cur.execute(
             "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = %s",
-            (self.schema,),
+            (self.schema_name,),
         )
         if cur.fetchone()[0] == 0:
-            cur.execute(f'CREATE SCHEMA "{self.schema}"')
+            cur.execute(f'CREATE SCHEMA "{self.schema_name}"')
 
     def create_col(self, vector_size: int = None, distance: str = None) -> None:
         table = self.table_name
@@ -838,7 +838,7 @@ class GaussDB(VectorStoreBase):
                     FROM information_schema.tables
                     WHERE table_schema = %s
                     """,
-                    (self.schema,),
+                    (self.schema_name,),
                 )
                 rows = cur.fetchall()
             return [
@@ -870,12 +870,12 @@ class GaussDB(VectorStoreBase):
                     WHERE schemaname = %s AND tablename = %s
                     ORDER BY indexname
                     """,
-                    (self.schema, self.collection_name),
+                    (self.schema_name, self.collection_name),
                 )
                 indexes = [row[0] for row in cur.fetchall()]
             return {
                 "name": self.collection_name,
-                "schema": self.schema,
+                "schema_name": self.schema_name,
                 "count": row_count,
                 "dimension": self.embedding_model_dims,
                 "schema_version": schema_version,
@@ -901,7 +901,7 @@ class GaussDB(VectorStoreBase):
                 WHERE table_schema = %s AND table_name = %s
             )
             """,
-            (self.schema, f"{self.collection_name}_schema_meta"),
+            (self.schema_name, f"{self.collection_name}_schema_meta"),
         )
         if not cur.fetchone()[0]:
             return 1

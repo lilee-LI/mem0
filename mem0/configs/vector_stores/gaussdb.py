@@ -14,7 +14,7 @@ _ENV_DEFAULTS = {
     "password": ("GAUSSDB_PASSWORD",),
     "sslmode": ("GAUSSDB_SSLMODE",),
     "sslrootcert": ("GAUSSDB_SSLROOTCERT",),
-    "schema": ("GAUSSDB_SCHEMA",),
+    "schema_name": ("GAUSSDB_SCHEMA_NAME", "GAUSSDB_SCHEMA"),
 }
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -40,12 +40,7 @@ class GaussDBConfig(BaseModel):
     connection_string: Optional[str] = Field(None, description="GaussDB connection string (overrides host/port/user/password)")
     sslmode: Optional[str] = Field(None, description="SSL mode (e.g., require, prefer, disable)")
     sslrootcert: Optional[str] = Field(None, description="SSL root certificate path")
-    schema_name: str = Field(
-        "public",
-        validation_alias="schema",
-        serialization_alias="schema",
-        description="Optional advanced schema name; defaults to public",
-    )
+    schema_name: str = Field("public", description="Optional advanced schema name; defaults to public")
     minconn: int = Field(1, description="Minimum number of connections in the pool")
     maxconn: int = Field(5, description="Maximum number of connections in the pool")
 
@@ -77,7 +72,7 @@ class GaussDBConfig(BaseModel):
                 if env_val:
                     values[field] = env_val
 
-        allowed_fields = set(cls.model_fields.keys()) | {"schema"}
+        allowed_fields = set(cls.model_fields.keys())
         input_fields = set(values.keys())
         extra_fields = input_fields - allowed_fields
         if extra_fields:
@@ -129,7 +124,7 @@ class GaussDBConfig(BaseModel):
         if self.maxconn < self.minconn:
             raise ValueError("maxconn must be >= minconn")
         if not isinstance(self.schema_name, str) or not _IDENTIFIER_RE.match(self.schema_name):
-            raise ValueError("schema must be a safe identifier using letters, numbers, and underscores")
+            raise ValueError("schema_name must be a safe identifier using letters, numbers, and underscores")
         allowed_metadata_types = {"string", "text", "number", "bool", "datetime"}
         for key, value in self.metadata_schema.items():
             if not isinstance(key, str) or not key:
@@ -139,9 +134,5 @@ class GaussDBConfig(BaseModel):
                     f"metadata_schema[{key!r}] must be one of {sorted(allowed_metadata_types)}, got {value!r}"
                 )
         return self
-
-    @property
-    def schema(self) -> str:
-        return self.schema_name
 
     model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)

@@ -160,7 +160,7 @@ def test_commercial_centralized_crud_scope_and_batch_paths():
         assert db.get(bob_only) is None
 
 
-def test_commercial_centralized_filter_matrix_and_undeclared_range_compatibility(caplog):
+def test_commercial_centralized_filter_matrix_and_inferred_range_compatibility(caplog):
     with _managed_db(prefix="commercial_filter") as db:
         travel_id = _uuid(9201)
         food_id = _uuid(9202)
@@ -250,8 +250,8 @@ def test_commercial_centralized_filter_matrix_and_undeclared_range_compatibility
                 top_k=10,
                 filters={"user_id": "commercial_filter", "priority": {"gte": 5}},
             )
-        _assert_exact_ids(rows, set())
-        assert "falling back to literal compatibility matching" in caplog.text
+        _assert_exact_ids(rows, {travel_id, work_id})
+        assert "typed range semantics for this field shape" not in caplog.text
 
 
 def test_commercial_centralized_typed_exact_bool_and_null_filters():
@@ -375,11 +375,8 @@ def test_commercial_centralized_wildcard_exists_missing_and_null_distinction():
         )
 
 
-def test_commercial_centralized_declared_numeric_range_and_undeclared_compatibility(caplog):
-    with _managed_db(
-        prefix="commercial_range",
-        metadata_schema={"priority": "number"},
-    ) as db:
+def test_commercial_centralized_inferred_numeric_range_and_non_inferable_compatibility(caplog):
+    with _managed_db(prefix="commercial_range") as db:
         low_id = _uuid(9261)
         mid_id = _uuid(9262)
         high_id = _uuid(9263)
@@ -439,14 +436,11 @@ def test_commercial_centralized_declared_numeric_range_and_undeclared_compatibil
         with caplog.at_level(logging.WARNING):
             rows = db.search("range", VECTOR_COFFEE, top_k=10, filters={"user_id": "commercial_range", "category": {"gte": "a"}})
         _assert_exact_ids(rows, set())
-        assert "falling back to literal compatibility matching" in caplog.text
+        assert "typed range semantics for this field shape" in caplog.text
 
 
 def test_commercial_centralized_cross_path_typed_filter_parity():
-    with _managed_db(
-        prefix="commercial_parity",
-        metadata_schema={"priority": "number"},
-    ) as db:
+    with _managed_db(prefix="commercial_parity") as db:
         primary_id = _uuid(9264)
         secondary_id = _uuid(9265)
         archived_id = _uuid(9266)
@@ -741,7 +735,7 @@ def test_commercial_distributed_collection_lifecycle():
 
 @pytest.mark.skipif(not _env_bool("GAUSSDB_TEST_DISTRIBUTED"), reason="Set GAUSSDB_TEST_DISTRIBUTED=true to run distributed commercial validation")
 def test_commercial_distributed_filter_and_range_semantics(caplog):
-    db = _new_dist_db(metadata_schema={"priority": "number"})
+    db = _new_dist_db()
     try:
         low_id = _uuid(9701)
         high_id = _uuid(9702)
@@ -779,7 +773,7 @@ def test_commercial_distributed_filter_and_range_semantics(caplog):
         with caplog.at_level(logging.WARNING):
             rows = db.search("distributed", [1.0, 0.0, 0.0, 0.0], top_k=10, filters={"user_id": "dist_filter", "score": {"gt": 5}})
         _assert_exact_ids(rows, set())
-        assert "falling back to literal compatibility matching" in caplog.text
+        assert "typed range semantics for this field shape" in caplog.text
     finally:
         db.delete_col()
 

@@ -11,7 +11,7 @@ Current provider highlights:
 - `gsdiskann` and `gsivfflat` vector indexes
 - scoped read isolation using `user_id`, `agent_id`, and `run_id`
 - typed exact metadata filtering
-- controlled typed range support for declared `number` and `datetime` fields
+- controlled typed range support for inferred JSON `number` fields and standard datetime strings
 - centralized BM25 `keyword_search`
 - optional custom `schema_name` support with `public` as the default
 
@@ -77,7 +77,6 @@ config = {
 | `minconn` / `maxconn` | Connection pool bounds | `1` / `5` |
 | `auto_create` | Create collection automatically on init | `True` |
 | `require_scoped_filters` | Optionally require positive scope filters on read paths | `False` |
-| `metadata_schema` | Optional typed metadata declarations | `{}` |
 | `sslmode` / `sslrootcert` | Optional SSL settings | `None` |
 
 For GaussDB vector operators, note that the current provider treats:
@@ -142,9 +141,10 @@ Supported typed exact operators:
 
 Typed range behavior:
 
-- declared `number` and `datetime` fields receive true typed range handling
-- undeclared range emits a warning and falls back to compatibility literal matching
-- malformed rows in declared ranges are ignored rather than failing the whole query
+- JSON numbers are inferred automatically for range filters
+- ISO/RFC3339-style datetime strings are inferred automatically for range filters
+- unsupported range values emit a warning and are treated as literal JSON equality filters instead of typed range filters
+- malformed rows in inferred datetime ranges are ignored rather than failing the whole query
 
 Example:
 
@@ -156,14 +156,19 @@ config = {
             "connection_string": "postgresql://gaussdb_user:gaussdb_password@127.0.0.1:19995/postgres",
             "collection_name": "mem0_prod",
             "embedding_model_dims": 1536,
-            "metadata_schema": {
-                "priority": "number",
-                "created_at": "datetime",
-            },
         },
     },
 }
 ```
+
+In practice this means range filters can work directly for fields such as:
+
+- `price`
+- `priority`
+- `range_km`
+- `expires_at` (when stored in standard ISO/RFC3339 timestamp form)
+
+If a range filter uses a field or value shape that cannot be inferred as JSON `number` or standard datetime, the provider stops treating `gt/gte/lt/lte` as typed range semantics for that field shape and falls back to literal JSON equality behavior.
 
 ## Wildcard, exists, missing, null
 

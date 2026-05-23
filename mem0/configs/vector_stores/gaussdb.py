@@ -18,6 +18,9 @@ _ENV_DEFAULTS = {
 }
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+_DEPLOYMENT_MODES = {"centralized", "distributed"}
+_VECTOR_INDEX_TYPES = {"gsdiskann", "gsivfflat"}
+_VECTOR_METRICS = {"cosine", "l2"}
 
 
 def _first_env(names: tuple[str, ...]) -> Optional[str]:
@@ -26,6 +29,55 @@ def _first_env(names: tuple[str, ...]) -> Optional[str]:
         if value:
             return value
     return None
+
+
+def _validate_positive_int(value: int, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field_name} must be >= 1")
+    if value <= 0:
+        raise ValueError(f"{field_name} must be >= 1")
+    return value
+
+
+def validate_gaussdb_static_options(
+    *,
+    embedding_model_dims: int,
+    minconn: int,
+    maxconn: int,
+    schema_name: str,
+    deployment_mode: str,
+    vector_index_type: str,
+    vector_metric: str,
+) -> None:
+    embedding_model_dims = _validate_positive_int(embedding_model_dims, "embedding_model_dims")
+    minconn = _validate_positive_int(minconn, "minconn")
+    maxconn = _validate_positive_int(maxconn, "maxconn")
+
+    if deployment_mode not in _DEPLOYMENT_MODES:
+        raise ValueError(f"deployment_mode must be 'centralized' or 'distributed', got '{deployment_mode}'")
+    if vector_index_type not in _VECTOR_INDEX_TYPES:
+        raise ValueError(f"vector_index_type must be 'gsdiskann' or 'gsivfflat', got '{vector_index_type}'")
+    if vector_metric not in _VECTOR_METRICS:
+        raise ValueError(f"vector_metric must be 'cosine' or 'l2', got '{vector_metric}'")
+    if deployment_mode == "distributed" and embedding_model_dims > 1024:
+        raise ValueError(
+            f"GaussDB distributed mode only supports embedding dimensions <= 1024, "
+            f"but embedding_model_dims={embedding_model_dims}."
+        )
+    if deployment_mode == "centralized" and embedding_model_dims > 4096:
+        raise ValueError(
+            f"GaussDB centralized mode only supports embedding dimensions <= 4096, "
+            f"but embedding_model_dims={embedding_model_dims}."
+        )
+    if embedding_model_dims > 1024 and vector_index_type != "gsdiskann":
+        raise ValueError(
+            f"embedding_model_dims={embedding_model_dims} exceeds 1024; "
+            f"only GsDiskANN supports >1024 dimensions. Set vector_index_type='gsdiskann'."
+        )
+    if maxconn < minconn:
+        raise ValueError("maxconn must be >= minconn")
+    if not isinstance(schema_name, str) or not _IDENTIFIER_RE.match(schema_name):
+        raise ValueError("schema_name must be a safe identifier using letters, numbers, and underscores")
 
 
 class GaussDBConfig(BaseModel):
@@ -57,10 +109,6 @@ class GaussDBConfig(BaseModel):
     require_scoped_filters: bool = Field(
         False,
         description="Optionally require at least one positive scoped filter (user_id, agent_id, run_id) on read paths; recommended for production multi-tenant use",
-    )
-    metadata_schema: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Optional advanced metadata type declarations used for typed range and future typed filter behavior",
     )
 
     @model_validator(mode="before")
@@ -96,43 +144,15 @@ class GaussDBConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_values(self):
-        if self.deployment_mode not in ("centralized", "distributed"):
-            raise ValueError(f"deployment_mode must be 'centralized' or 'distributed', got '{self.deployment_mode}'")
-        if self.vector_index_type not in ("gsdiskann", "gsivfflat"):
-            raise ValueError(f"vector_index_type must be 'gsdiskann' or 'gsivfflat', got '{self.vector_index_type}'")
-        if self.vector_metric not in ("cosine", "l2"):
-            raise ValueError(f"vector_metric must be 'cosine' or 'l2', got '{self.vector_metric}'")
-        if self.deployment_mode == "distributed" and self.embedding_model_dims > 1024:
-            raise ValueError(
-                f"GaussDB distributed mode only supports embedding dimensions <= 1024, "
-                f"but embedding_model_dims={self.embedding_model_dims}."
-            )
-        if self.deployment_mode == "centralized" and self.embedding_model_dims > 4096:
-            raise ValueError(
-                f"GaussDB centralized mode only supports embedding dimensions <= 4096, "
-                f"but embedding_model_dims={self.embedding_model_dims}."
-            )
-        if self.embedding_model_dims > 1024 and self.vector_index_type != "gsdiskann":
-            raise ValueError(
-                f"embedding_model_dims={self.embedding_model_dims} exceeds 1024; "
-                f"only GsDiskANN supports >1024 dimensions. Set vector_index_type='gsdiskann'."
-            )
-        if self.minconn < 1:
-            raise ValueError("minconn must be >= 1")
-        if self.maxconn < 1:
-            raise ValueError("maxconn must be >= 1")
-        if self.maxconn < self.minconn:
-            raise ValueError("maxconn must be >= minconn")
-        if not isinstance(self.schema_name, str) or not _IDENTIFIER_RE.match(self.schema_name):
-            raise ValueError("schema_name must be a safe identifier using letters, numbers, and underscores")
-        allowed_metadata_types = {"string", "text", "number", "bool", "datetime"}
-        for key, value in self.metadata_schema.items():
-            if not isinstance(key, str) or not key:
-                raise ValueError("metadata_schema keys must be non-empty strings")
-            if value not in allowed_metadata_types:
-                raise ValueError(
-                    f"metadata_schema[{key!r}] must be one of {sorted(allowed_metadata_types)}, got {value!r}"
-                )
+        validate_gaussdb_static_options(
+            embedding_model_dims=self.embedding_model_dims,
+            minconn=self.minconn,
+            maxconn=self.maxconn,
+            schema_name=self.schema_name,
+            deployment_mode=self.deployment_mode,
+            vector_index_type=self.vector_index_type,
+            vector_metric=self.vector_metric,
+        )
         return self
 
     model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)

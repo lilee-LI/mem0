@@ -8,6 +8,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel
@@ -17,6 +18,7 @@ try:
 except ImportError:
     ThreadedConnectionPool = None
 
+from mem0.configs.vector_stores.gaussdb import validate_gaussdb_static_options
 from mem0.vector_stores.base import VectorStoreBase
 
 logger = logging.getLogger(__name__)
@@ -104,7 +106,6 @@ class GaussDB(VectorStoreBase):
         vector_metric: str = "cosine",
         auto_create: bool = True,
         require_scoped_filters: bool = False,
-        metadata_schema: Optional[Dict[str, str]] = None,
     ):
         connection_string = connection_string or _first_env("GAUSSDB_CONNECTION_STRING", "GAUSSDB_DSN", "GAUSSDB_URL")
         database = _first_env("GAUSSDB_DATABASE", "GAUSSDB_DBNAME") or database
@@ -115,41 +116,32 @@ class GaussDB(VectorStoreBase):
         sslmode = sslmode or _first_env("GAUSSDB_SSLMODE")
         sslrootcert = sslrootcert or _first_env("GAUSSDB_SSLROOTCERT")
         schema_name = _first_env("GAUSSDB_SCHEMA_NAME", "GAUSSDB_SCHEMA") or schema_name
-
         self.database = database
         self.collection_name = self._validate_identifier(collection_name, "collection_name")
-        self.embedding_model_dims = self._validate_positive_int(embedding_model_dims, "embedding_model_dims")
+        self.embedding_model_dims = embedding_model_dims
         self.user = user
         self.password = password
         self.host = host
         self.port = int(port) if port is not None else None
         self.connection_string = connection_string
-        self.minconn = self._validate_positive_int(minconn, "minconn")
-        self.maxconn = self._validate_positive_int(maxconn, "maxconn")
-        if self.maxconn < self.minconn:
-            raise ValueError("maxconn must be >= minconn")
+        self.minconn = minconn
+        self.maxconn = maxconn
         self.sslmode = sslmode
         self.sslrootcert = sslrootcert
-        self.deployment_mode = self._validate_choice(
-            str(deployment_mode).lower(), "deployment_mode", {"centralized", "distributed"}
+        self.deployment_mode = str(deployment_mode).lower()
+        self.vector_index_type = vector_index_type.lower()
+        self.vector_metric = vector_metric.lower()
+        validate_gaussdb_static_options(
+            embedding_model_dims=self.embedding_model_dims,
+            minconn=self.minconn,
+            maxconn=self.maxconn,
+            schema_name=schema_name,
+            deployment_mode=self.deployment_mode,
+            vector_index_type=self.vector_index_type,
+            vector_metric=self.vector_metric,
         )
-        self.vector_index_type = self._validate_choice(
-            vector_index_type.lower(), "vector_index_type", {"gsdiskann", "gsivfflat"}
-        )
-        self.vector_metric = self._validate_choice(vector_metric.lower(), "vector_metric", {"cosine", "l2"})
 
         # Derived from deployment_mode
-        max_embedding_dims = 1024 if self.deployment_mode == "distributed" else 4096
-        if self.embedding_model_dims > max_embedding_dims:
-            raise ValueError(
-                f"GaussDB {self.deployment_mode} mode supports embedding dimensions <= {max_embedding_dims}, "
-                f"but embedding_model_dims={self.embedding_model_dims}."
-            )
-        if self.embedding_model_dims > 1024 and self.vector_index_type != "gsdiskann":
-            raise ValueError(
-                f"embedding_model_dims={self.embedding_model_dims} exceeds 1024; "
-                f"only GsDiskANN supports >1024 dimensions. Set vector_index_type='gsdiskann'."
-            )
         self.distribution_mode = "hash" if self.deployment_mode == "distributed" else "none"
 
         # Hardcoded internal defaults
@@ -168,7 +160,6 @@ class GaussDB(VectorStoreBase):
         self.require_scoped_filters = bool(require_scoped_filters)
         self.scope_filter_keys = ("user_id", "agent_id", "run_id")
         self.allowed_filter_keys = None
-        self.metadata_schema: Dict[str, str] = dict(metadata_schema or {})
         self.enable_observability = True
         self.slow_query_ms = 1000
         self.retry_attempts = 2
@@ -1123,11 +1114,12 @@ class GaussDB(VectorStoreBase):
         return expression, [key]
 
     def _build_range_filter(self, key: str, value: dict) -> Tuple[str, List[Any]]:
-        field_type = self.metadata_schema.get(key)
-        if field_type not in {"number", "datetime"}:
+        field_type = self._resolve_range_field_type(key, value)
+        if field_type is None:
             logger.warning(
-                "Range filter operators on field %r do not have a declared number/datetime metadata type; "
-                "falling back to literal compatibility matching.",
+                "Range filter operators on field %r could not be resolved to number/datetime semantics; "
+                "treating the filter as a literal JSON equality expression for compatibility with providers "
+                "that do not implement typed range semantics for this field shape.",
                 key,
             )
             return self._field_exact_expression(key, value, negate=False)
@@ -1162,6 +1154,30 @@ class GaussDB(VectorStoreBase):
         if not expressions:
             raise ValueError(f"Unsupported range filter for field {key!r}")
         return " AND ".join(expressions), params
+
+    def _resolve_range_field_type(self, key: str, value: dict) -> Optional[str]:
+        range_values = [value[op] for op in ("gt", "gte", "lt", "lte") if op in value]
+        if not range_values:
+            return None
+
+        if all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in range_values):
+            return "number"
+
+        if all(self._is_iso_datetime_string(item) for item in range_values):
+            return "datetime"
+
+        return None
+
+    @staticmethod
+    def _is_iso_datetime_string(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            datetime.fromisoformat(candidate)
+            return True
+        except ValueError:
+            return False
 
     def close(self):
         """Explicitly release the connection pool."""

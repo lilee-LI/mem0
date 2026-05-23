@@ -98,18 +98,6 @@ def test_gaussdb_config_accepts_require_scoped_filters_override():
     assert cfg.require_scoped_filters is True
 
 
-def test_gaussdb_config_accepts_metadata_schema():
-    cfg = GaussDBConfig(
-        host="localhost",
-        port=5432,
-        user="test",
-        password="test",
-        metadata_schema={"priority": "number", "title": "text", "flag": "bool"},
-    )
-
-    assert cfg.metadata_schema == {"priority": "number", "title": "text", "flag": "bool"}
-
-
 def test_gaussdb_config_accepts_custom_schema_name():
     cfg = GaussDBConfig(
         host="localhost",
@@ -130,17 +118,6 @@ def test_gaussdb_config_rejects_invalid_schema_name():
             user="test",
             password="test",
             schema_name="bad-schema",
-        )
-
-
-def test_gaussdb_config_rejects_invalid_metadata_schema_type():
-    with pytest.raises(Exception, match="metadata_schema"):
-        GaussDBConfig(
-            host="localhost",
-            port=5432,
-            user="test",
-            password="test",
-            metadata_schema={"priority": "decimal"},
         )
 
 
@@ -314,7 +291,7 @@ def test_centralized_mode_sets_none_distribution():
 
 
 def test_rejects_high_dims_for_distributed():
-    with pytest.raises(ValueError, match="distributed mode supports"):
+    with pytest.raises(ValueError, match="distributed mode only supports"):
         make_gaussdb(deployment_mode="distributed", embedding_model_dims=2048)
 
 
@@ -714,23 +691,22 @@ def test_search_not_uses_is_not_true_semantics():
     assert "((payload @> %s::JSONB) IS NOT TRUE)" in sql
 
 
-def test_search_range_on_undeclared_field_warns_and_falls_back_to_literal_match(caplog):
+def test_search_range_on_undeclared_numeric_field_auto_infers_number():
     db, _, _, mock_cursor = make_gaussdb()
     mock_cursor.fetchall.return_value = []
-    caplog.set_level(logging.WARNING, logger="mem0.vector_stores.gaussdb")
 
     db.search("hello", [0.1, 0.2, 0.3], filters={"user_id": "u1", "priority": {"gte": 3}})
 
     sql = executed_sql(mock_cursor)
     params = mock_cursor.execute.call_args.args[1]
-    assert "payload @> %s::JSONB" in sql
-    assert params[2] == '{"priority":{"gte":3}}'
-    assert "falling back to literal compatibility matching" in caplog.text
+    assert "CASE WHEN jsonb_typeof(payload->%s) = 'number'" in sql
+    assert "THEN CAST(payload->>%s AS DOUBLE PRECISION) END >= %s" in sql
+    assert params[1] == "u1"
+    assert params[2:5] == ("priority", "priority", 3)
 
 
-def test_search_declared_numeric_range_uses_typed_numeric_cast():
+def test_search_inferred_numeric_range_uses_typed_numeric_cast():
     db, _, _, mock_cursor = make_gaussdb()
-    db.metadata_schema = {"priority": "number"}
     mock_cursor.fetchall.return_value = []
 
     db.search("hello", [0.1, 0.2, 0.3], filters={"user_id": "u1", "priority": {"gte": 3, "lt": 7}})
@@ -745,10 +721,9 @@ def test_search_declared_numeric_range_uses_typed_numeric_cast():
     assert params[5:8] == ("priority", "priority", 7)
 
 
-def test_list_declared_datetime_range_uses_timestamptz_cast_and_guard():
+def test_list_undeclared_datetime_range_auto_infers_timestamptz_cast_and_guard():
     db, _, _, mock_cursor = make_gaussdb()
     db.require_scoped_filters = False
-    db.metadata_schema = {"created_at": "datetime"}
     mock_cursor.fetchall.return_value = []
 
     db.list(filters={"created_at": {"lt": "2026-01-01T00:00:00Z"}})
@@ -766,50 +741,8 @@ def test_list_declared_datetime_range_uses_timestamptz_cast_and_guard():
     assert params[5] == 100
 
 
-def test_list_declared_datetime_range_with_multiple_bounds_repeats_regex_params():
+def test_range_on_non_inferable_type_warns_and_uses_literal_json_compatibility(caplog):
     db, _, _, mock_cursor = make_gaussdb()
-    db.require_scoped_filters = False
-    db.metadata_schema = {"created_at": "datetime"}
-    mock_cursor.fetchall.return_value = []
-
-    db.list(
-        filters={
-            "created_at": {
-                "gte": "2026-01-01T00:00:00Z",
-                "lt": "2026-12-31T00:00:00Z",
-            }
-        }
-    )
-
-    params = mock_cursor.execute.call_args.args[1]
-    assert params[0:5] == (
-        "created_at",
-        "created_at",
-        params[2],
-        "created_at",
-        "2026-01-01T00:00:00Z",
-    )
-    assert params[5:10] == (
-        "created_at",
-        "created_at",
-        params[7],
-        "created_at",
-        "2026-12-31T00:00:00Z",
-    )
-    assert params[2] == params[7]
-
-    sql = executed_sql(mock_cursor)
-    assert sql.count("payload->>%s ~ %s") == 2
-    assert params[2].startswith("^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}T")
-    assert params[4] == "2026-01-01T00:00:00Z"
-    assert params[7].startswith("^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}T")
-    assert params[9] == "2026-12-31T00:00:00Z"
-    assert params[10] == 100
-
-
-def test_range_on_non_range_declared_type_warns_and_falls_back(caplog):
-    db, _, _, mock_cursor = make_gaussdb()
-    db.metadata_schema = {"category": "string"}
     mock_cursor.fetchall.return_value = []
     caplog.set_level(logging.WARNING, logger="mem0.vector_stores.gaussdb")
 
@@ -819,7 +752,10 @@ def test_range_on_non_range_declared_type_warns_and_falls_back(caplog):
     params = mock_cursor.execute.call_args.args[1]
     assert "payload @> %s::JSONB" in sql
     assert params[2] == '{"category":{"gte":"a"}}'
-    assert "falling back to literal compatibility matching" in caplog.text
+    assert (
+        "treating the filter as a literal JSON equality expression for compatibility with providers "
+        "that do not implement typed range semantics for this field shape"
+    ) in caplog.text
 
 
 def test_search_requires_scoped_filters_when_explicitly_enabled():
@@ -835,12 +771,6 @@ def test_constructor_allows_unscoped_reads_by_default():
 
     assert db.require_scoped_filters is False
     assert db.search("hello", [0.1, 0.2, 0.3], filters={"category": "test"}) == []
-
-
-def test_constructor_accepts_metadata_schema():
-    db, _, _, _ = make_gaussdb(metadata_schema={"priority": "number", "created_at": "datetime"})
-
-    assert db.metadata_schema == {"priority": "number", "created_at": "datetime"}
 
 
 def test_constructor_accepts_custom_schema_and_uses_qualified_names():
@@ -1155,7 +1085,7 @@ def test_icontains_filter_escapes_backslash():
 
 
 @pytest.mark.parametrize("op", ["gt", "gte", "lt", "lte"])
-def test_range_filter_operator_dict_warns_and_falls_back_without_declared_type(op, caplog):
+def test_range_filter_operator_dict_auto_infers_number_without_declared_type(op, caplog):
     db, _, _, mock_cursor = make_gaussdb()
     db.require_scoped_filters = False
     mock_cursor.fetchall.return_value = []
@@ -1165,9 +1095,12 @@ def test_range_filter_operator_dict_warns_and_falls_back_without_declared_type(o
 
     sql = executed_sql(mock_cursor)
     params = mock_cursor.execute.call_args.args[1]
-    assert "payload @> %s::JSONB" in sql
-    assert params[0] == json.dumps({"priority": {op: 2}}, ensure_ascii=False, separators=(",", ":"))
-    assert "falling back to literal compatibility matching" in caplog.text
+    assert "CASE WHEN jsonb_typeof(payload->%s) = 'number'" in sql
+    assert f"THEN CAST(payload->>%s AS DOUBLE PRECISION) END {'>=' if op == 'gte' else '>' if op == 'gt' else '<=' if op == 'lte' else '<'} %s" in sql
+    assert params[0] == "priority"
+    assert params[1] == "priority"
+    assert params[2] == 2
+    assert "typed range semantics for this field shape" not in caplog.text
 
 
 # ============================================================
@@ -1866,9 +1799,9 @@ def test_build_filter_expression_and_field_helpers_cover_error_and_edge_paths():
     with pytest.raises(ValueError):
         db._build_presence_filter("category", {"unknown": True})
 
-    db.metadata_schema = {"created_at": "datetime"}
-    with pytest.raises(ValueError):
-        db._build_range_filter("created_at", {})
+    expr, params = db._build_range_filter("created_at", {})
+    assert expr == "payload @> %s::JSONB"
+    assert params == ['{"created_at":{}}']
 
 
 def test_close_context_manager_and_del_handle_pool_cleanup():

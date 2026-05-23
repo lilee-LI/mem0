@@ -76,7 +76,6 @@ config = {
 | `schema_name` | Optional advanced schema name | `public` |
 | `minconn` / `maxconn` | Connection pool bounds | `1` / `5` |
 | `auto_create` | Create collection automatically on init | `True` |
-| `require_scoped_filters` | Optionally require positive scope filters on read paths | `False` |
 | `sslmode` / `sslrootcert` | Optional SSL settings | `None` |
 
 For GaussDB vector operators, note that the current provider treats:
@@ -100,6 +99,8 @@ Before using the provider, make sure:
 - the application account has table, index, and read/write privileges
 - centralized mode is used when you need dimensions above `1024` or BM25 `keyword_search`
 
+For BM25 `keyword_search`, treat the UTF8 requirement as part of the supported capability boundary, not just a generic recommendation. GaussDB documents BM25 tokenization support for UTF-8 encoded Chinese and English text, so centralized keyword search should be positioned as a UTF8 Chinese/English feature rather than a general multilingual text-search promise.
+
 For vector index creation, the provider raises `maintenance_work_mem` only for the index-build transaction:
 
 - default vector-index build target: `256MB`
@@ -109,9 +110,11 @@ If index creation still fails because `maintenance_work_mem` is too small, the o
 
 ## Scoped filtering
 
-By default, the provider does not require a positive scope filter on read paths.
+GaussDB keeps the same split used by other Mem0 vector-store adapters:
 
-If you enable `require_scoped_filters=True`, the provider enforces a positive scope filter requirement.
+- `search`, `list`, and `keyword_search` accept whatever filters the caller provides
+- scope isolation is typically enforced by the higher-level `Memory` APIs, which already require `user_id`, `agent_id`, or `run_id` on their scoped read paths
+- direct provider calls without scope are allowed when you intentionally want unscoped access
 
 Valid positive scope examples:
 
@@ -121,7 +124,7 @@ Valid positive scope examples:
 {"user_id": {"in": ["u1", "u2"]}}
 ```
 
-Invalid positive scope examples:
+Examples that are valid SQL/filter shapes but are not positive scope constraints by themselves:
 
 ```python
 {"user_id": {"ne": "u1"}}
@@ -204,6 +207,8 @@ That means:
 - distributed mode: BM25 is not part of the current capability promise, so `keyword_search()` returns `None`
 
 `keyword_search()` depends on the BM25 index path, not just plain text storage. If the BM25 index is missing or the database cannot use that BM25 index path, the `###` query fails instead of falling back to a sequential scan.
+
+GaussDB's documented BM25 tokenization boundary is limited to UTF-8 encoded Chinese and English text. In practice, that means `keyword_search()` should be treated as a centralized UTF8 Chinese/English capability.
 
 ## Commercial posture
 

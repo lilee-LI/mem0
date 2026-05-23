@@ -613,7 +613,7 @@ def test_commercial_distributed_contract_and_crud_smoke():
 
 @pytest.mark.skipif(not _env_bool("GAUSSDB_TEST_DISTRIBUTED"), reason="Set GAUSSDB_TEST_DISTRIBUTED=true to run distributed commercial validation")
 def test_commercial_distributed_scope_guard_and_tenant_isolation():
-    db = _new_dist_db(require_scoped_filters=True)
+    db = _new_dist_db()
     try:
         alice_id = _uuid(9901)
         bob_id = _uuid(9902)
@@ -645,15 +645,19 @@ def test_commercial_distributed_scope_guard_and_tenant_isolation():
         )
         _assert_exact_ids(_list_flat(db, filters={"user_id": "dist_bob"}, top_k=10), {bob_id})
 
-        with pytest.raises(ValueError, match="requires at least one scoped filter"):
-            db.search("coffee", [1.0, 0.0, 0.0, 0.0], top_k=10, filters={"category": "public"})
-        with pytest.raises(ValueError, match="requires at least one scoped filter"):
+        _assert_exact_ids(
+            db.search("coffee", [1.0, 0.0, 0.0, 0.0], top_k=10, filters={"category": "public"}),
+            {public_like_id},
+        )
+        _assert_exact_ids(
             db.search(
                 "coffee",
                 [1.0, 0.0, 0.0, 0.0],
                 top_k=10,
                 filters={"$or": [{"user_id": "dist_alice"}, {"category": "public"}]},
-            )
+            ),
+            {alice_id, public_like_id},
+        )
     finally:
         db.delete_col()
 

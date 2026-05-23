@@ -808,7 +808,7 @@ class TestMultiTenantIsolation:
 
     @classmethod
     def setup_class(cls):
-        cls.db = _new_db(prefix="filter_tenant", require_scoped_filters=True)
+        cls.db = _new_db(prefix="filter_tenant")
         _insert_memories(cls.db, [
             # test_user_id_isolation (user_id="mt_alice", "mt_bob", "mt_carol")
             (_uuid(700), VECTOR_COFFEE, _make_payload("alice item", user_id="mt_alice")),
@@ -894,18 +894,10 @@ class TestMultiTenantIsolation:
         )
         _assert_exact_ids(rows, {_uuid(760)})
 
-    def test_scope_guard_missing_user_id_raises_error(self):
-        """Search without any scope filter raises ValueError when require_scoped_filters=True."""
-        with pytest.raises(ValueError, match="requires at least one scoped filter"):
-            self.db.search("test", VECTOR_COFFEE, top_k=10, filters={"category": "food"})
-
-    def test_or_without_scope_in_all_branches_raises_error(self):
-        """$or where not all branches have scope filter raises ValueError."""
-        with pytest.raises(ValueError, match="requires at least one scoped filter"):
-            self.db.search(
-                "test", VECTOR_COFFEE, top_k=10,
-                filters={"$or": [{"user_id": "mt_u780"}, {"category": "food"}]},
-            )
+    def test_unscoped_search_is_allowed_on_direct_provider_calls(self):
+        """Direct provider calls without scope are allowed and rely on explicit filters only."""
+        rows = self.db.search("test", VECTOR_COFFEE, top_k=10, filters={"category": "food"})
+        _assert_exact_ids(rows, {_uuid(770), _uuid(780), _uuid(790)})
 
     def test_filter_mode_json_expression_basic(self):
         """json_expression filter mode supports payload key filtering."""
@@ -4154,7 +4146,7 @@ def test_provider_crud_batch_upsert_update_and_delete():
 
 
 def test_scoped_search_list_and_batch_do_not_cross_tenants():
-    db = _new_db(require_scoped_filters=True)
+    db = _new_db()
     try:
         alice_id = _uuid(11)
         bob_id = _uuid(12)
@@ -4213,20 +4205,23 @@ def test_scoped_search_list_and_batch_do_not_cross_tenants():
         )
         _assert_exact_ids(valid_or_rows, {alice_id, bob_id})
 
-        with pytest.raises(ValueError, match="requires at least one scoped filter"):
-            db.search("latte", VECTOR_COFFEE, top_k=10, filters={"$or": [{"user_id": "alice"}, {"category": "public"}]})
+        _assert_exact_ids(
+            db.search("latte", VECTOR_COFFEE, top_k=10, filters={"$or": [{"user_id": "alice"}, {"category": "public"}]}),
+            {alice_id, public_id},
+        )
 
-        with pytest.raises(ValueError, match="requires at least one scoped filter"):
-            db.search("latte", VECTOR_COFFEE, top_k=10, filters={"user_id": {"ne": "bob"}})
+        _assert_exact_ids(
+            db.search("latte", VECTOR_COFFEE, top_k=10, filters={"user_id": {"ne": "bob"}}),
+            {alice_id},
+        )
 
-        with pytest.raises(ValueError, match="requires at least one scoped filter"):
-            db.list(filters={"category": "public"})
+        _assert_exact_ids(_list_flat(db, {"category": "public"}), {public_id})
     finally:
         db.delete_col()
 
 
-def test_live_keyword_and_batch_paths_reject_non_constraining_scope_filters():
-    db = _new_db(require_scoped_filters=True)
+def test_live_keyword_and_batch_paths_allow_unscoped_or_non_constraining_filters():
+    db = _new_db()
     try:
         db.bm25_enabled = True
         bad_filters = [
@@ -4236,10 +4231,9 @@ def test_live_keyword_and_batch_paths_reject_non_constraining_scope_filters():
         ]
 
         for filters in bad_filters:
-            with pytest.raises(ValueError, match="requires at least one scoped filter"):
-                db.keyword_search("latte", top_k=5, filters=filters)
-            with pytest.raises(ValueError, match="requires at least one scoped filter"):
-                db.search_batch(["latte"], [VECTOR_COFFEE], top_k=1, filters=filters)
+            db.keyword_search("latte", top_k=5, filters=filters)
+            batch_rows = db.search_batch(["latte"], [VECTOR_COFFEE], top_k=10, filters=filters)
+            assert len(batch_rows) == 1
     finally:
         db.delete_col()
 

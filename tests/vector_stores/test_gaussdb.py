@@ -64,7 +64,6 @@ def test_gaussdb_config_defaults():
     assert cfg.minconn == 1
     assert cfg.maxconn == 5
     assert cfg.auto_create is True
-    assert cfg.require_scoped_filters is False
 
 
 def test_gaussdb_config_accepts_connection_string():
@@ -84,18 +83,6 @@ def test_gaussdb_config_accepts_distributed_deployment_mode():
     )
 
     assert cfg.deployment_mode == "distributed"
-
-
-def test_gaussdb_config_accepts_require_scoped_filters_override():
-    cfg = GaussDBConfig(
-        host="localhost",
-        port=5432,
-        user="test",
-        password="test",
-        require_scoped_filters=True,
-    )
-
-    assert cfg.require_scoped_filters is True
 
 
 def test_gaussdb_config_accepts_custom_schema_name():
@@ -595,7 +582,7 @@ def test_search_wildcard_filter_is_skipped_not_literal_match():
 
 
 def test_search_all_wildcard_metadata_filters_do_not_leave_dangling_and():
-    db, _, _, mock_cursor = make_gaussdb(require_scoped_filters=False)
+    db, _, _, mock_cursor = make_gaussdb()
     mock_cursor.fetchall.return_value = []
 
     db.search("hello", [0.1, 0.2, 0.3], filters={"category": "*", "tag": "*"})
@@ -723,7 +710,6 @@ def test_search_inferred_numeric_range_uses_typed_numeric_cast():
 
 def test_list_undeclared_datetime_range_auto_infers_timestamptz_cast_and_guard():
     db, _, _, mock_cursor = make_gaussdb()
-    db.require_scoped_filters = False
     mock_cursor.fetchall.return_value = []
 
     db.list(filters={"created_at": {"lt": "2026-01-01T00:00:00Z"}})
@@ -758,18 +744,10 @@ def test_range_on_non_inferable_type_warns_and_uses_literal_json_compatibility(c
     ) in caplog.text
 
 
-def test_search_requires_scoped_filters_when_explicitly_enabled():
-    db, _, _, _ = make_gaussdb(require_scoped_filters=True)
-
-    with pytest.raises(ValueError, match="requires at least one scoped filter"):
-        db.search("hello", [0.1, 0.2, 0.3], filters={"category": "test"})
-
-
-def test_constructor_allows_unscoped_reads_by_default():
-    db, _, _, mock_cursor = make_gaussdb(require_scoped_filters=False)
+def test_constructor_allows_unscoped_reads():
+    db, _, _, mock_cursor = make_gaussdb()
     mock_cursor.fetchall.return_value = []
 
-    assert db.require_scoped_filters is False
     assert db.search("hello", [0.1, 0.2, 0.3], filters={"category": "test"}) == []
 
 
@@ -794,27 +772,7 @@ def test_constructor_accepts_custom_schema_and_uses_qualified_names():
         {"user_id": {"missing": True}},
     ],
 )
-def test_search_rejects_non_constraining_scope_filters(filters):
-    db, _, _, _ = make_gaussdb(require_scoped_filters=True)
-
-    with pytest.raises(ValueError, match="requires at least one scoped filter"):
-        db.search("hello", [0.1, 0.2, 0.3], filters=filters)
-
-
-@pytest.mark.parametrize(
-    "filters",
-    [
-        {"user_id": "alice"},
-        {"user_id": {"eq": "alice"}},
-        {"user_id": {"in": ["alice", "bob"]}},
-        {"AND": [{"category": "travel"}, {"user_id": "alice"}]},
-        {"$and": [{"category": "travel"}, {"user_id": {"eq": "alice"}}]},
-        {"OR": [{"user_id": "alice"}, {"user_id": "bob"}]},
-        {"$or": [{"user_id": {"eq": "alice"}}, {"agent_id": {"in": ["agent-1", "agent-2"]}}]},
-        {"AND": [{"category": "travel"}, {"OR": [{"user_id": "alice"}, {"run_id": "run-1"}]}]},
-    ],
-)
-def test_search_accepts_positive_constraining_scope_filters(filters):
+def test_search_accepts_various_scope_filter_shapes(filters):
     db, _, _, mock_cursor = make_gaussdb()
     mock_cursor.fetchall.return_value = []
 
@@ -824,7 +782,6 @@ def test_search_accepts_positive_constraining_scope_filters(filters):
 
 def test_filter_builder_rejects_unsafe_keys():
     db, _, _, _ = make_gaussdb()
-    db.require_scoped_filters = False
 
     with pytest.raises(ValueError, match="Unsafe filter key"):
         db.list(filters={"bad-key": "x"})
@@ -832,7 +789,6 @@ def test_filter_builder_rejects_unsafe_keys():
 
 def test_list_uses_scope_columns_and_typed_bool_filters():
     db, _, _, mock_cursor = make_gaussdb()
-    db.require_scoped_filters = False
     mock_cursor.fetchall.return_value = []
 
     db.list(filters={"user_id": "u1", "flag": True})
@@ -892,25 +848,6 @@ def test_keyword_search_returns_none_when_bm25_disabled():
     db.bm25_enabled = False
 
     assert db.keyword_search("hello", filters={"user_id": "u1"}) is None
-
-
-@pytest.mark.parametrize(
-    "filters",
-    [
-        {"OR": [{"user_id": "alice"}, {"category": "public"}]},
-        {"$or": [{"user_id": "alice"}, {"category": "public"}]},
-        {"NOT": [{"user_id": "alice"}]},
-        {"user_id": {"ne": "alice"}},
-        {"user_id": {"nin": ["alice"]}},
-    ],
-)
-def test_keyword_search_rejects_non_constraining_scope_filters(filters):
-    db, _, _, mock_cursor = make_gaussdb(require_scoped_filters=True)
-
-    with pytest.raises(ValueError, match="requires at least one scoped filter"):
-        db.keyword_search("hello", top_k=3, filters=filters)
-
-    mock_cursor.execute.assert_not_called()
 
 
 # ============================================================
@@ -974,25 +911,6 @@ def test_search_batch_uses_sequential_search_path():
     assert db.metrics.get("gaussdb_fallback_count", 0) == 0
 
 
-@pytest.mark.parametrize(
-    "filters",
-    [
-        {"OR": [{"user_id": "alice"}, {"category": "public"}]},
-        {"$or": [{"user_id": "alice"}, {"category": "public"}]},
-        {"NOT": [{"user_id": "alice"}]},
-        {"user_id": {"ne": "alice"}},
-        {"user_id": {"nin": ["alice"]}},
-    ],
-)
-def test_search_batch_rejects_non_constraining_scope_filters(filters):
-    db, _, _, mock_cursor = make_gaussdb(require_scoped_filters=True)
-
-    with pytest.raises(ValueError, match="requires at least one scoped filter"):
-        db.search_batch(["hello"], [[0.1, 0.2, 0.3]], filters=filters)
-
-    mock_cursor.execute.assert_not_called()
-
-
 # ============================================================
 # Update tests
 # ============================================================
@@ -1045,7 +963,6 @@ def test_update_payload_only_refreshes_text_fields():
 
 def test_contains_filter_escapes_percent_wildcard():
     db, _, _, mock_cursor = make_gaussdb()
-    db.require_scoped_filters = False
     mock_cursor.fetchall.return_value = []
 
     db.list(filters={"user_id": {"contains": "100%"}})
@@ -1059,7 +976,6 @@ def test_contains_filter_escapes_percent_wildcard():
 
 def test_contains_filter_escapes_underscore_wildcard():
     db, _, _, mock_cursor = make_gaussdb()
-    db.require_scoped_filters = False
     mock_cursor.fetchall.return_value = []
 
     db.list(filters={"user_id": {"contains": "a_b"}})
@@ -1071,7 +987,6 @@ def test_contains_filter_escapes_underscore_wildcard():
 
 def test_icontains_filter_escapes_backslash():
     db, _, _, mock_cursor = make_gaussdb()
-    db.require_scoped_filters = False
     mock_cursor.fetchall.return_value = []
 
     db.list(filters={"user_id": {"icontains": r"a\b"}})
@@ -1087,7 +1002,6 @@ def test_icontains_filter_escapes_backslash():
 @pytest.mark.parametrize("op", ["gt", "gte", "lt", "lte"])
 def test_range_filter_operator_dict_auto_infers_number_without_declared_type(op, caplog):
     db, _, _, mock_cursor = make_gaussdb()
-    db.require_scoped_filters = False
     mock_cursor.fetchall.return_value = []
     caplog.set_level(logging.WARNING, logger="mem0.vector_stores.gaussdb")
 
@@ -1747,23 +1661,9 @@ def test_read_schema_version_returns_default_when_meta_missing_or_row_missing():
     assert db._read_schema_version(cur) == 1
 
 
-def test_build_where_clause_and_scope_helpers_cover_guard_paths():
-    db, *_ = make_gaussdb(require_scoped_filters=True)
-    with pytest.raises(ValueError):
-        db._build_where_clause({"category": "x"}, require_scope=True)
-
-    db.require_scoped_filters = False
-    assert db._build_where_clause(None, require_scope=True) == ("", [])
-    with patch.object(db, "_build_filter_expression", return_value=("", [])):
-        assert db._build_where_clause({"user_id": "u1"}, require_scope=False) == ("", [])
-
-    assert db._has_scope_filter({"$and": [{"category": "x"}, {"user_id": "u1"}]}) is True
-    assert db._has_scope_filter({"$or": [{"user_id": "u1"}, {"category": "x"}]}) is False
-    assert db._has_scope_filter({"$not": [{"user_id": "u1"}]}) is False
-
-    assert GaussDB._is_positive_scope_filter_value("*") is False
-    assert GaussDB._is_positive_scope_filter_value({"eq": "u1"}) is True
-    assert GaussDB._is_positive_scope_filter_value({"in": ["", None]}) is False
+def test_build_where_clause_returns_empty_for_missing_filters():
+    db, *_ = make_gaussdb()
+    assert db._build_where_clause(None) == ("", [])
 
 
 def test_build_filter_expression_and_field_helpers_cover_error_and_edge_paths():
@@ -1920,16 +1820,6 @@ def test_delete_col_executes_drop_statements():
     sqls = executed_sql(cur)
     assert "DROP TABLE IF EXISTS" in sqls
     assert db.collection_name in sqls
-
-
-def test_scope_helpers_cover_false_and_singleton_branches():
-    assert GaussDB._is_positive_scope_filter_value([]) is False
-    assert GaussDB._is_positive_scope_filter_value({"eq": ""}) is False
-    assert GaussDB._is_positive_scope_filter_value({"in": "bad"}) is False
-
-    db, *_ = make_gaussdb()
-    assert db._has_scope_filter(None) is False
-    assert db._has_scope_filter({"$or": []}) is False
 
 
 def test_build_filter_expression_skips_empty_subexpressions_and_not_branch():

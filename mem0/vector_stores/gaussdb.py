@@ -105,7 +105,6 @@ class GaussDB(VectorStoreBase):
         vector_index_type: str = "gsdiskann",
         vector_metric: str = "cosine",
         auto_create: bool = True,
-        require_scoped_filters: bool = False,
     ):
         connection_string = connection_string or _first_env("GAUSSDB_CONNECTION_STRING", "GAUSSDB_DSN", "GAUSSDB_URL")
         database = _first_env("GAUSSDB_DATABASE", "GAUSSDB_DBNAME") or database
@@ -157,8 +156,6 @@ class GaussDB(VectorStoreBase):
         self.payload_storage_mode = "jsonb"
         self.filter_storage_mode = "json_expression"
         self.metadata_column_mode = "jsonb"
-        self.require_scoped_filters = bool(require_scoped_filters)
-        self.scope_filter_keys = ("user_id", "agent_id", "run_id")
         self.allowed_filter_keys = None
         self.enable_observability = True
         self.slow_query_ms = 1000
@@ -593,7 +590,7 @@ class GaussDB(VectorStoreBase):
             logger.warning("BM25 index creation failed; keyword_search disabled", exc_info=True)
 
     def _create_filter_indexes(self, cur, table: str):
-        for key in self.scope_filter_keys:
+        for key in self._redundant_scope_columns:
             safe_key = self._validate_filter_key(key)
             index_name = self._quote_identifier(self._index_name(self.collection_name, f"{safe_key}_idx"))
             savepoint = self._quote_identifier(f"mem0_filter_idx_{uuid.uuid4().hex[:8]}")
@@ -694,7 +691,7 @@ class GaussDB(VectorStoreBase):
     def search(
         self, query: str, vectors: List[float], top_k: int = 5, filters: Optional[dict] = None
     ) -> List[OutputData]:
-        where_clause, params = self._build_where_clause(filters, require_scope=True)
+        where_clause, params = self._build_where_clause(filters)
         vector_literal = self._vector_literal(vectors)
 
         def op():
@@ -726,7 +723,7 @@ class GaussDB(VectorStoreBase):
         if not query or not query.strip():
             return []
 
-        where_clause, params = self._build_where_clause(filters, require_scope=True)
+        where_clause, params = self._build_where_clause(filters)
         prefix = " AND " if where_clause else " WHERE "
 
         def op():
@@ -914,7 +911,7 @@ class GaussDB(VectorStoreBase):
         return int(row[0]) if row else 1
 
     def list(self, filters: Optional[dict] = None, top_k: Optional[int] = 100) -> List[List[OutputData]]:
-        where_clause, params = self._build_where_clause(filters, require_scope=True)
+        where_clause, params = self._build_where_clause(filters)
         limit = 100 if top_k is None else top_k
 
         def op():
@@ -939,51 +936,13 @@ class GaussDB(VectorStoreBase):
         self.delete_col()
         self.create_col(vector_size=self.embedding_model_dims, distance=self.vector_metric)
 
-    def _build_where_clause(self, filters: Optional[dict], require_scope: bool) -> Tuple[str, List[Any]]:
-        if require_scope and self.require_scoped_filters and not self._has_scope_filter(filters):
-            raise ValueError(
-                f"GaussDB provider requires at least one scoped filter when require_scoped_filters=True: {', '.join(self.scope_filter_keys)}"
-            )
+    def _build_where_clause(self, filters: Optional[dict]) -> Tuple[str, List[Any]]:
         if not filters:
             return "", []
         expression, params = self._build_filter_expression(filters)
         if not expression:
             return "", []
         return f"WHERE {expression}", params
-
-    def _has_scope_filter(self, filters: Optional[dict]) -> bool:
-        if not filters or not isinstance(filters, dict):
-            return False
-        for key, value in filters.items():
-            normalized_key = {"$and": "AND", "$or": "OR", "$not": "NOT"}.get(key, key)
-            if normalized_key == "AND" and isinstance(value, list):
-                if any(self._has_scope_filter(item) for item in value if isinstance(item, dict)):
-                    return True
-            elif normalized_key == "OR" and isinstance(value, list):
-                if value and all(isinstance(item, dict) and self._has_scope_filter(item) for item in value):
-                    return True
-            elif normalized_key == "NOT":
-                continue
-            elif key in self.scope_filter_keys and self._is_positive_scope_filter_value(value):
-                return True
-        return False
-
-    @staticmethod
-    def _is_positive_scope_filter_value(value: Any) -> bool:
-        if value is None or value == "" or value == "*":
-            return False
-        if isinstance(value, list):
-            return any(GaussDB._is_positive_scope_filter_value(item) for item in value)
-        if isinstance(value, dict):
-            if "eq" in value:
-                return GaussDB._is_positive_scope_filter_value(value["eq"])
-            if "in" in value:
-                in_values = value["in"]
-                if not isinstance(in_values, (list, tuple, set)):
-                    return False
-                return any(GaussDB._is_positive_scope_filter_value(item) for item in in_values)
-            return False
-        return True
 
     def _build_filter_expression(self, filters: dict) -> Tuple[str, List[Any]]:
         if not isinstance(filters, dict):
@@ -1026,7 +985,7 @@ class GaussDB(VectorStoreBase):
                 return self._field_in_expression(key, value, negate=False)
             if value is None:
                 return self._field_exact_expression(key, value, negate=False)
-            if key in self.scope_filter_keys:
+            if key in self._redundant_scope_columns:
                 field_sql, params = self._field_sql(key)
                 return f"{field_sql} = %s", [*params, value]
             if value == "*":
@@ -1042,7 +1001,7 @@ class GaussDB(VectorStoreBase):
         if "eq" in value:
             return self._build_field_filter(key, value["eq"])
         if "ne" in value:
-            if key in self.scope_filter_keys:
+            if key in self._redundant_scope_columns:
                 field_sql, params = self._field_sql(key)
                 return f"{field_sql} <> %s", [*params, value["ne"]]
             return self._field_exact_expression(key, value["ne"], negate=True)
@@ -1065,7 +1024,7 @@ class GaussDB(VectorStoreBase):
         values = list(values)
         if not values:
             return ("1 = 1" if negate else "1 = 0"), []
-        if key in self.scope_filter_keys:
+        if key in self._redundant_scope_columns:
             field_sql, params = self._field_sql(key)
             placeholders = ", ".join(["%s"] * len(values))
             operator = "NOT IN" if negate else "IN"

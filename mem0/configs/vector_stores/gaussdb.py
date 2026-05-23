@@ -106,10 +106,6 @@ class GaussDBConfig(BaseModel):
 
     # Operational
     auto_create: bool = Field(True, description="Automatically create collection on init if it does not exist")
-    require_scoped_filters: bool = Field(
-        False,
-        description="Optionally require at least one positive scoped filter (user_id, agent_id, run_id) on read paths; recommended for production multi-tenant use",
-    )
 
     @model_validator(mode="before")
     @classmethod

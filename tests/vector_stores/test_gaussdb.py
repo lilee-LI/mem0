@@ -719,6 +719,35 @@ def test_search_inferred_numeric_range_uses_typed_numeric_cast():
     assert params[5:8] == ("priority", "priority", 7)
 
 
+def test_search_rejects_mixed_range_and_non_range_operators_for_same_field():
+    db, _, _, mock_cursor = make_gaussdb()
+    mock_cursor.fetchall.return_value = []
+
+    with pytest.raises(ValueError, match="Cannot mix range operators"):
+        db.search("hello", [0.1, 0.2, 0.3], filters={"user_id": "u1", "priority": {"gt": 3, "eq": 7}})
+
+    assert mock_cursor.execute.call_count == 0
+
+
+def test_search_supports_explicit_and_for_range_and_non_range_same_field():
+    db, _, _, mock_cursor = make_gaussdb()
+    mock_cursor.fetchall.return_value = []
+
+    db.search(
+        "hello",
+        [0.1, 0.2, 0.3],
+        filters={"$and": [{"priority": {"gt": 3}}, {"priority": {"eq": 7}}]},
+    )
+
+    sql = executed_sql(mock_cursor)
+    params = mock_cursor.execute.call_args.args[1]
+    assert "CASE WHEN jsonb_typeof(payload->%s) = 'number'" in sql
+    assert "THEN CAST(payload->>%s AS DOUBLE PRECISION) END > %s" in sql
+    assert "payload @> %s::JSONB" in sql
+    assert params[1:4] == ("priority", "priority", 3)
+    assert params[4] == '{"priority":7}'
+
+
 def test_list_undeclared_datetime_range_auto_infers_timestamptz_cast_and_guard():
     db, _, _, mock_cursor = make_gaussdb()
     mock_cursor.fetchall.return_value = []

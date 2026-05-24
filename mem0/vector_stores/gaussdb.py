@@ -975,6 +975,13 @@ class GaussDB(VectorStoreBase):
         ops = set(value.keys())
         range_ops = {"gt", "gte", "lt", "lte"}
         if ops & range_ops:
+            non_range_ops = ops - range_ops
+            if non_range_ops:
+                raise ValueError(
+                    f"Cannot mix range operators ({sorted(ops & range_ops)}) with "
+                    f"non-range operators ({sorted(non_range_ops)}) for field {key!r}. "
+                    "Use AND to combine them as separate conditions."
+                )
             return self._build_range_filter(key, value)
         if ops & {"exists", "not_exists", "missing"}:
             return self._build_presence_filter(key, value)

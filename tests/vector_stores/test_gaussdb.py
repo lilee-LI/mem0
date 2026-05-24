@@ -580,6 +580,18 @@ def test_search_wildcard_filter_is_skipped_not_literal_match():
     assert params == ("[0.1,0.2,0.3]", "u1", 5)
 
 
+def test_search_wildcard_scope_filter_is_skipped_not_literal_match():
+    db, _, _, mock_cursor = make_gaussdb()
+    mock_cursor.fetchall.return_value = []
+
+    db.search("hello", [0.1, 0.2, 0.3], filters={"user_id": "*"})
+
+    sql = executed_sql(mock_cursor)
+    params = mock_cursor.execute.call_args.args[1]
+    assert '"user_id" = %s' not in sql
+    assert params == ("[0.1,0.2,0.3]", 5)
+
+
 def test_search_all_wildcard_metadata_filters_do_not_leave_dangling_and():
     db, _, _, mock_cursor = make_gaussdb()
     mock_cursor.fetchall.return_value = []
@@ -1245,9 +1257,12 @@ def test_create_connection_pool_requires_driver_package():
     with patch.object(gaussdb_module, "ThreadedConnectionPool", None):
         with pytest.raises(ImportError):
             db._create_connection_pool()
+    with patch.object(gaussdb_module, "make_dsn", None):
+        with pytest.raises(ImportError):
+            db._create_connection_pool()
 
 
-def test_build_dsn_uses_connection_string_and_appends_ssl():
+def test_build_dsn_merges_uri_connection_string_ssl_options():
     db, *_ = make_gaussdb(
         connection_string="postgresql://user:pass@localhost:19995/mem0db",
         sslmode="require",
@@ -1255,8 +1270,22 @@ def test_build_dsn_uses_connection_string_and_appends_ssl():
     )
 
     dsn = db._build_dsn()
+    assert "dbname=mem0db" in dsn
+    assert "user=user" in dsn
     assert "sslmode=require" in dsn
     assert "sslrootcert=/tmp/root.crt" in dsn
+
+
+def test_build_dsn_preserves_uri_query_parameters_when_merging_ssl():
+    db, *_ = make_gaussdb(
+        connection_string="postgresql://user:pass@localhost:19995/mem0db?application_name=mem0_app",
+        sslmode="require",
+    )
+
+    dsn = db._build_dsn()
+    assert "dbname=mem0db" in dsn
+    assert "application_name=mem0_app" in dsn
+    assert "sslmode=require" in dsn
 
 
 def test_build_dsn_requires_individual_fields_when_missing():
@@ -1761,11 +1790,15 @@ def test_create_connection_pool_success_uses_sanitized_dsn(caplog):
 
 def test_build_dsn_does_not_duplicate_ssl_when_already_present():
     db, *_ = make_gaussdb(
-        connection_string="postgresql://u:p@h:1/db sslmode=require sslrootcert=/tmp/x"
+        connection_string="postgresql://u:p@h:1/db?application_name=mem0&sslmode=disable&sslrootcert=%2Ftmp%2Fx",
+        sslmode="require",
+        sslrootcert="/tmp/x",
     )
     dsn = db._build_dsn()
     assert dsn.count("sslmode=") == 1
     assert dsn.count("sslrootcert=") == 1
+    assert "application_name=mem0" in dsn
+    assert "sslmode=require" in dsn
 
 
 def test_create_col_updates_distance_choice():

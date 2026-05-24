@@ -15,8 +15,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from pydantic import BaseModel
 
 try:
+    from psycopg2.extensions import make_dsn
     from psycopg2.pool import ThreadedConnectionPool
 except ImportError:
+    make_dsn = None
     ThreadedConnectionPool = None
 
 from mem0.configs.vector_stores.gaussdb import validate_gaussdb_static_options
@@ -249,7 +251,7 @@ class GaussDB(VectorStoreBase):
         return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     def _create_connection_pool(self):
-        if ThreadedConnectionPool is None:
+        if ThreadedConnectionPool is None or make_dsn is None:
             raise ImportError(
                 "GaussDB vector store requires the GaussDB official psycopg2 driver package. "
                 "Install the GaussDB psycopg2 wheel provided for your database version."
@@ -261,12 +263,12 @@ class GaussDB(VectorStoreBase):
 
     def _build_dsn(self) -> str:
         if self.connection_string:
-            dsn = self.connection_string
-            if self.sslmode and "sslmode=" not in dsn:
-                dsn = f"{dsn} sslmode={self.sslmode}"
-            if self.sslrootcert and "sslrootcert=" not in dsn:
-                dsn = f"{dsn} sslrootcert={self.sslrootcert}"
-            return dsn
+            overrides = {}
+            if self.sslmode:
+                overrides["sslmode"] = self.sslmode
+            if self.sslrootcert:
+                overrides["sslrootcert"] = self.sslrootcert
+            return make_dsn(self.connection_string, **overrides)
 
         missing = [
             name
@@ -945,6 +947,8 @@ class GaussDB(VectorStoreBase):
     def _build_field_filter(self, key: str, value: Any) -> Tuple[str, List[Any]]:
         self._validate_filter_key(key)
         if not isinstance(value, dict):
+            if value == "*":
+                return "", []
             if isinstance(value, list):
                 return self._field_in_expression(key, value, negate=False)
             if value is None:
@@ -952,8 +956,6 @@ class GaussDB(VectorStoreBase):
             if key in self._redundant_scope_columns:
                 field_sql, params = self._field_sql(key)
                 return f"{field_sql} = %s", [*params, value]
-            if value == "*":
-                return "", []
             return self._field_exact_expression(key, value, negate=False)
 
         ops = set(value.keys())

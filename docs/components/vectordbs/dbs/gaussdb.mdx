@@ -216,6 +216,13 @@ That means:
 
 `keyword_search()` depends on the BM25 index path, not just plain text storage. If the BM25 index is missing or the database cannot use that BM25 index path, the `###` query fails instead of falling back to a sequential scan.
 
+The provider keeps two lightweight safeguards for BM25 execution:
+
+- it sets `enable_seqscan = off` for the BM25 query transaction
+- it emits an `indexscan(...)` hint using the provider's default BM25 index name
+
+That hint strategy is intentionally lightweight. If a DBA manually rebuilds the BM25 index under a different name, the built-in hint may no longer match even though the provider still keeps `enable_seqscan = off` as a secondary safeguard.
+
 GaussDB's documented BM25 tokenization boundary is limited to UTF-8 encoded Chinese and English text. In practice, that means `keyword_search()` should be treated as a centralized UTF8 Chinese/English capability.
 
 ## Commercial posture

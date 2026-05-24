@@ -816,6 +816,7 @@ def test_keyword_search_uses_bm25_defaults_and_filters():
     assert "SET LOCAL bm25_ranking_metric = 0" in sql
     assert "SET LOCAL bm25_ncandidates = 128" in sql
     assert "SET LOCAL enable_seqscan = off" in sql
+    assert '/*+ indexscan("test_collection" "test_collection_bm25_idx") */' in sql
     assert "text_lemmatized ### %s AS score" in sql
     assert "ORDER BY score DESC" in sql
     assert results[0].score == 2.5
@@ -1813,6 +1814,11 @@ def test_apply_bm25_settings_sets_expected_bm25_knobs():
     assert "SET LOCAL bm25_ranking_metric = 0" in sql
     assert "SET LOCAL bm25_ncandidates = 128" in sql
     assert "SET LOCAL enable_seqscan = off" in sql
+
+
+def test_bm25_index_hint_uses_default_generated_index_name():
+    db, *_ = make_gaussdb()
+    assert db._bm25_index_hint() == '/*+ indexscan("test_collection" "test_collection_bm25_idx") */'
 
 
 def test_delete_col_executes_drop_statements():

@@ -725,6 +725,7 @@ class GaussDB(VectorStoreBase):
 
         where_clause, params = self._build_where_clause(filters)
         prefix = " AND " if where_clause else " WHERE "
+        bm25_hint = self._bm25_index_hint()
 
         def op():
             try:
@@ -732,7 +733,7 @@ class GaussDB(VectorStoreBase):
                     self._apply_bm25_settings(cur)
                     cur.execute(
                         f"""
-                        SELECT id, text_lemmatized ### %s AS score, payload
+                        SELECT {bm25_hint} id, text_lemmatized ### %s AS score, payload
                         FROM {self.table_name}
                         {where_clause}
                         {prefix}(text_lemmatized ### %s) > 0
@@ -752,6 +753,11 @@ class GaussDB(VectorStoreBase):
                 return None
 
         return self._run_with_retry("keyword_search", op)
+
+    def _bm25_index_hint(self) -> str:
+        index_name = self._quote_identifier(self._index_name(self.collection_name, "bm25_idx"))
+        table_name = self._quote_identifier(self.collection_name)
+        return f"/*+ indexscan({table_name} {index_name}) */"
 
     def _apply_bm25_settings(self, cur):
         cur.execute(f"SET LOCAL bm25_ranking_metric = {int(self.bm25_ranking_metric)}")

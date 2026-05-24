@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -299,7 +300,9 @@ class GaussDB(VectorStoreBase):
     @staticmethod
     def _quote_dsn_value(value: str) -> str:
         text = str(value)
-        if re.search(r"\s|'", text):
+        if text == "":
+            return "''"
+        if re.search(r"\s|'|\\", text):
             return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
         return text
 
@@ -423,7 +426,13 @@ class GaussDB(VectorStoreBase):
 
     @staticmethod
     def _vector_literal(vector: Sequence[float]) -> str:
-        return "[" + ",".join(str(float(value)) for value in vector) + "]"
+        parts = []
+        for index, value in enumerate(vector):
+            numeric = float(value)
+            if not math.isfinite(numeric):
+                raise ValueError(f"Vector values must be finite numbers; got {value!r} at index {index}")
+            parts.append(str(numeric))
+        return "[" + ",".join(parts) + "]"
 
     def _schema_exists(self, cur) -> bool:
         cur.execute(

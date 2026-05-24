@@ -1283,6 +1283,12 @@ def test_build_dsn_quotes_individual_values_with_whitespace():
     assert "sslrootcert='C:\\\\root cert.pem'" in dsn
 
 
+def test_quote_dsn_value_handles_empty_backslash_and_equals_safely():
+    assert GaussDB._quote_dsn_value("") == "''"
+    assert GaussDB._quote_dsn_value("abc=def") == "abc=def"
+    assert GaussDB._quote_dsn_value(r"C:\tmp\root.crt") == r"'C:\\tmp\\root.crt'"
+
+
 def test_sanitize_dsn_redacts_passwords():
     dsn = "dbname=postgres user=a password='secret pass' host=localhost"
     url = "postgresql://user:secret@localhost:5432/db"
@@ -1381,6 +1387,13 @@ def test_payload_value_decode_payload_and_vector_literal():
     assert db._decode_payload('{"k": 2}') == {"k": 2}
     assert db._decode_payload(DummyMap()) == {"k": "v"}
     assert db._vector_literal([1, 2.5]) == "[1.0,2.5]"
+
+
+@pytest.mark.parametrize("bad_value", [float("inf"), float("-inf"), float("nan")])
+def test_vector_literal_rejects_non_finite_values(bad_value):
+    db, *_ = make_gaussdb()
+    with pytest.raises(ValueError, match="finite numbers"):
+        db._vector_literal([1.0, bad_value, 3.0])
 
 
 @pytest.mark.parametrize(

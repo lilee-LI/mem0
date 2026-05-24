@@ -45,6 +45,10 @@ _RETRYABLE_ERROR_FRAGMENTS = (
     "server closed",
     "terminating connection",
 )
+_BM25_UNAVAILABLE_ERROR_FRAGMENTS = (
+    "no bm25 index is used",
+    "gs_bm25_distance_text is called",
+)
 
 
 def _first_env(*names: str) -> Optional[str]:
@@ -362,6 +366,20 @@ class GaussDB(VectorStoreBase):
     def _is_retryable(exc: Exception) -> bool:
         message = str(exc).lower()
         return any(fragment in message for fragment in _RETRYABLE_ERROR_FRAGMENTS)
+
+    @staticmethod
+    def _is_bm25_unavailable_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        if any(fragment in message for fragment in _BM25_UNAVAILABLE_ERROR_FRAGMENTS):
+            return True
+        return (
+            "bm25" in message
+            and (
+                "not currently supported" in message
+                or ("operator does not exist" in message and "###" in message)
+                or ("function does not exist" in message)
+            )
+        )
 
     def _record_latency(self, operation: str, start: float, outcome: str):
         if not self.enable_observability:
@@ -754,10 +772,12 @@ class GaussDB(VectorStoreBase):
                     OutputData(id=str(row[0]), score=float(row[1]), payload=self._decode_payload(row[2]))
                     for row in rows
                 ]
-            except Exception:
-                self._increment_metric("gaussdb_fallback_count")
-                logger.debug("GaussDB BM25 keyword search failed", exc_info=True)
-                return None
+            except Exception as exc:
+                if self._is_bm25_unavailable_error(exc):
+                    self._increment_metric("gaussdb_fallback_count")
+                    logger.debug("GaussDB BM25 keyword search unavailable; falling back", exc_info=True)
+                    return None
+                raise
 
         return self._run_with_retry("keyword_search", op)
 

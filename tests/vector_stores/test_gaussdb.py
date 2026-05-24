@@ -1681,10 +1681,39 @@ def test_keyword_search_failure_returns_none_and_success_applies_settings():
         assert rows[0].payload == {"k": 1}
         assert "SET LOCAL bm25_ranking_metric" in executed_sql(cur)
 
-    with patch.object(db, "_get_cursor", side_effect=RuntimeError("bm25 failed")), patch.object(
+    with patch.object(
+        db, "_get_cursor", side_effect=RuntimeError("gs_bm25_distance_text is called, but no BM25 index is used")
+    ), patch.object(
         db, "_run_with_retry", side_effect=lambda op, func: func()
     ):
         assert db.keyword_search("probe", filters={"user_id": "u1"}) is None
+
+
+def test_keyword_search_retries_retryable_errors_and_returns_rows(monkeypatch):
+    db, *_ = make_gaussdb()
+    db.bm25_enabled = True
+    monkeypatch.setattr(gaussdb_module.time, "sleep", lambda *_: None)
+
+    cur_cm = MagicMock()
+    cur = MagicMock()
+    cur_cm.__enter__.return_value = cur
+    cur.fetchall.return_value = [("id1", 1.2, '{"k":"v"}')]
+
+    get_cursor = MagicMock(side_effect=[RuntimeError("connection reset by peer"), cur_cm])
+    with patch.object(db, "_get_cursor", get_cursor):
+        rows = db.keyword_search("probe", filters={"user_id": "u1"})
+
+    assert [row.id for row in rows] == ["id1"]
+    assert get_cursor.call_count == 2
+
+
+def test_keyword_search_raises_non_bm25_errors_instead_of_silent_none():
+    db, *_ = make_gaussdb()
+    db.bm25_enabled = True
+
+    with patch.object(db, "_get_cursor", side_effect=RuntimeError("permission denied for relation test_collection")):
+        with pytest.raises(RuntimeError, match="permission denied"):
+            db.keyword_search("probe", filters={"user_id": "u1"})
 
 
 def test_update_delete_get_list_reset_and_col_helpers():

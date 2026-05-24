@@ -525,6 +525,30 @@ def test_insert_none_payloads_and_ids_use_defaults():
     assert params[3] is None
 
 
+def test_insert_chunks_large_batches_into_multiple_merges():
+    db, _, _, mock_cursor = make_gaussdb(insert_batch_size=2)
+
+    db.insert(
+        vectors=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+        payloads=[
+            {"data": "a", "text_lemmatized": "a", "user_id": "u1"},
+            {"data": "b", "text_lemmatized": "b", "user_id": "u1"},
+            {"data": "c", "text_lemmatized": "c", "user_id": "u1"},
+        ],
+        ids=[
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333",
+        ],
+    )
+
+    calls = mock_cursor.execute.call_args_list
+    assert len(calls) == 2
+    assert all("MERGE INTO" in str(call.args[0]) for call in calls)
+    assert len(calls[0].args[1]) == 16
+    assert len(calls[1].args[1]) == 8
+
+
 # ============================================================
 # Search tests
 # ============================================================

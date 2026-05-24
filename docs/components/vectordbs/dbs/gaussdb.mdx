@@ -75,6 +75,7 @@ config = {
 | `vector_metric` | `cosine` or `l2` | `cosine` |
 | `schema_name` | Optional advanced schema name | `public` |
 | `minconn` / `maxconn` | Connection pool bounds | `1` / `5` |
+| `insert_batch_size` | Maximum rows per `MERGE INTO` batch during provider inserts | `2000` |
 | `auto_create` | Create collection automatically on init | `True` |
 | `sslmode` / `sslrootcert` | Optional SSL settings | `None` |
 
@@ -129,6 +130,18 @@ In short:
 
 - direct `GaussDB` provider writes: full replace
 - higher-level `Memory.update()`: preserve session/scope identifiers by default
+
+## Bulk insert behavior
+
+GaussDB provider inserts keep `MERGE INTO` upsert semantics, but large batches are split into smaller `MERGE` statements inside the same transaction.
+
+That means:
+
+- a single `insert()` call is still all-or-nothing
+- successful chunks are not committed early
+- `insert_batch_size` controls how many rows each `MERGE` carries
+
+The default `insert_batch_size=2000` is chosen to reduce oversized single-statement `MERGE` pressure during large imports while preserving direct-provider upsert semantics.
 
 Valid positive scope examples:
 

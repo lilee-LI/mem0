@@ -42,6 +42,7 @@ def _validate_positive_int(value: int, field_name: str) -> int:
 def validate_gaussdb_static_options(
     *,
     embedding_model_dims: int,
+    insert_batch_size: int,
     minconn: int,
     maxconn: int,
     schema_name: str,
@@ -50,6 +51,7 @@ def validate_gaussdb_static_options(
     vector_metric: str,
 ) -> None:
     embedding_model_dims = _validate_positive_int(embedding_model_dims, "embedding_model_dims")
+    insert_batch_size = _validate_positive_int(insert_batch_size, "insert_batch_size")
     minconn = _validate_positive_int(minconn, "minconn")
     maxconn = _validate_positive_int(maxconn, "maxconn")
 
@@ -95,6 +97,7 @@ class GaussDBConfig(BaseModel):
     schema_name: str = Field("public", description="Optional advanced schema name; defaults to public")
     minconn: int = Field(1, description="Minimum number of connections in the pool")
     maxconn: int = Field(5, description="Maximum number of connections in the pool")
+    insert_batch_size: int = Field(2000, description="Maximum number of rows per MERGE batch during insert")
 
     # Deployment & Vector
     deployment_mode: str = Field(
@@ -142,6 +145,7 @@ class GaussDBConfig(BaseModel):
     def validate_values(self):
         validate_gaussdb_static_options(
             embedding_model_dims=self.embedding_model_dims,
+            insert_batch_size=self.insert_batch_size,
             minconn=self.minconn,
             maxconn=self.maxconn,
             schema_name=self.schema_name,

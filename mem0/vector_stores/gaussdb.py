@@ -105,6 +105,7 @@ class GaussDB(VectorStoreBase):
         connection_string: Optional[str] = None,
         minconn: int = 1,
         maxconn: int = 5,
+        insert_batch_size: int = 2000,
         sslmode: Optional[str] = None,
         sslrootcert: Optional[str] = None,
         schema_name: str = "public",
@@ -132,6 +133,7 @@ class GaussDB(VectorStoreBase):
         self.connection_string = connection_string
         self.minconn = minconn
         self.maxconn = maxconn
+        self.insert_batch_size = insert_batch_size
         self.sslmode = sslmode
         self.sslrootcert = sslrootcert
         self.deployment_mode = str(deployment_mode).lower()
@@ -139,6 +141,7 @@ class GaussDB(VectorStoreBase):
         self.vector_metric = vector_metric.lower()
         validate_gaussdb_static_options(
             embedding_model_dims=self.embedding_model_dims,
+            insert_batch_size=self.insert_batch_size,
             minconn=self.minconn,
             maxconn=self.maxconn,
             schema_name=schema_name,
@@ -395,6 +398,11 @@ class GaussDB(VectorStoreBase):
             with self._metrics_lock:
                 self.metrics[key] = self.metrics.get(key, 0) + 1
 
+    @staticmethod
+    def _chunked(sequence: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
+        for index in range(0, len(sequence), size):
+            yield sequence[index : index + size]
+
     @property
     def _vector_operator(self) -> str:
         # In current GaussDB vector semantics, <+> maps to cosine distance.
@@ -485,6 +493,7 @@ class GaussDB(VectorStoreBase):
             effective_metric = self._validate_choice(distance.lower(), "distance", {"cosine", "l2"})
         validate_gaussdb_static_options(
             embedding_model_dims=dims,
+            insert_batch_size=self.insert_batch_size,
             minconn=self.minconn,
             maxconn=self.maxconn,
             schema_name=self.schema_name,
@@ -663,27 +672,29 @@ class GaussDB(VectorStoreBase):
         insert_columns_sql += ", updated_at"
         insert_values_sql = ", ".join(f"src.{self._quote_identifier(column)}" for column in columns)
         insert_values_sql += ", CURRENT_TIMESTAMP"
-        values_sql = ", ".join([self._incoming_values_sql(columns)] * len(rows))
         src_columns_sql = ", ".join(self._quote_identifier(column) for column in columns)
-        flat_params = tuple(value for row in rows for value in row)
 
         def op():
             with self._get_cursor(commit=True) as cur:
-                # MERGE INTO: GaussDB A-mode (Oracle compatible) atomic upsert.
-                # Avoids the race condition of separate UPDATE + INSERT WHERE NOT EXISTS.
-                cur.execute(
-                    f"""
-                    MERGE INTO {self.table_name} AS target
-                    USING (VALUES {values_sql}) AS src ({src_columns_sql})
-                    ON (target.id = src.id)
-                    WHEN MATCHED THEN
-                        UPDATE SET {update_set_sql}
-                    WHEN NOT MATCHED THEN
-                        INSERT ({insert_columns_sql})
-                        VALUES ({insert_values_sql})
-                    """,
-                    flat_params,
-                )
+                for chunk_rows in self._chunked(rows, self.insert_batch_size):
+                    values_sql = ", ".join([self._incoming_values_sql(columns)] * len(chunk_rows))
+                    flat_params = tuple(value for row in chunk_rows for value in row)
+                    # MERGE INTO: GaussDB A-mode (Oracle compatible) atomic upsert.
+                    # Chunk large batches to avoid oversized VALUES clauses while
+                    # preserving all-or-nothing semantics for a single insert() call.
+                    cur.execute(
+                        f"""
+                        MERGE INTO {self.table_name} AS target
+                        USING (VALUES {values_sql}) AS src ({src_columns_sql})
+                        ON (target.id = src.id)
+                        WHEN MATCHED THEN
+                            UPDATE SET {update_set_sql}
+                        WHEN NOT MATCHED THEN
+                            INSERT ({insert_columns_sql})
+                            VALUES ({insert_values_sql})
+                        """,
+                        flat_params,
+                    )
 
         return self._run_with_retry("insert", op)
 

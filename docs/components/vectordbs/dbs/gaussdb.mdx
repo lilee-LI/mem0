@@ -116,6 +116,14 @@ GaussDB keeps the same split used by other Mem0 vector-store adapters:
 - scope isolation is typically enforced by the higher-level `Memory` APIs, which already require `user_id`, `agent_id`, or `run_id` on their scoped read paths
 - direct provider calls without scope are allowed when you intentionally want unscoped access
 
+For direct provider writes, treat `payload` as the source of truth for scope values:
+
+- `insert()` uses upsert semantics for an existing `id`
+- `update(payload=...)` replaces the stored payload for that row
+- if the new payload omits `user_id`, `agent_id`, or `run_id`, the corresponding stored scope values are cleared as part of that full-replace behavior
+
+If you want session identifiers preserved automatically on ordinary memory edits, use the higher-level `Memory.update()` path instead of calling the provider directly.
+
 Valid positive scope examples:
 
 ```python

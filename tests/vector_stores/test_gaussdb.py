@@ -922,10 +922,15 @@ def test_update_vector_and_payload_updates_timestamp():
     db.update("id1", vector=[0.1, 0.2, 0.3], payload={"data": "new", "text_lemmatized": "new"})
 
     sql = executed_sql(mock_cursor)
+    params = mock_cursor.execute.call_args.args[1]
     assert 'UPDATE "public"."test_collection"' in sql
     assert "vector = %s::FLOATVECTOR" in sql
     assert "payload = %s::JSONB" in sql
+    assert '"user_id" = %s' in sql
+    assert '"agent_id" = %s' in sql
+    assert '"run_id" = %s' in sql
     assert "updated_at = CURRENT_TIMESTAMP" in sql
+    assert params[-4:] == (None, None, None, "id1")
 
 
 def test_update_vector_only_does_not_touch_payload():
@@ -941,7 +946,7 @@ def test_update_vector_only_does_not_touch_payload():
     assert params == ("[0.1,0.2,0.3]", "id1")
 
 
-def test_update_payload_only_refreshes_text_fields():
+def test_update_payload_only_full_replaces_scope_columns():
     db, _, _, mock_cursor = make_gaussdb()
 
     db.update("id1", payload={"data": "new", "text_lemmatized": "new lemma"})
@@ -952,7 +957,10 @@ def test_update_payload_only_refreshes_text_fields():
     assert "payload = %s::JSONB" in sql
     assert "memory = %s" in sql
     assert "text_lemmatized = %s" in sql
-    assert params[-3:] == ("new", "new lemma", "id1")
+    assert '"user_id" = %s' in sql
+    assert '"agent_id" = %s' in sql
+    assert '"run_id" = %s' in sql
+    assert params[-6:] == ("new", "new lemma", None, None, None, "id1")
 
 
 

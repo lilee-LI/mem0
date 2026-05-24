@@ -4465,6 +4465,45 @@ def test_live_multi_row_batch_upsert_updates_existing_and_inserts_new_rows():
         db.delete_col()
 
 
+def test_live_provider_update_payload_full_replace_clears_scope_when_omitted():
+    db = _new_db()
+    try:
+        memory_id = _uuid(144)
+        _insert_memories(
+            db,
+            [
+                (
+                    memory_id,
+                    VECTOR_COFFEE,
+                    {
+                        "data": "Scoped memory",
+                        "text_lemmatized": "scoped memory",
+                        "user_id": "replace_user",
+                        "category": "before",
+                    },
+                )
+            ],
+        )
+
+        assert _ids(db.search("scoped", VECTOR_COFFEE, top_k=1, filters={"user_id": "replace_user"})) == [memory_id]
+
+        db.update(
+            memory_id,
+            payload={
+                "data": "Scope cleared by provider update",
+                "text_lemmatized": "scope cleared by provider update",
+                "category": "after",
+            },
+        )
+
+        updated = db.get(memory_id)
+        assert updated.payload["data"] == "Scope cleared by provider update"
+        assert "user_id" not in updated.payload
+        assert _ids(db.search("scope", VECTOR_COFFEE, top_k=5, filters={"user_id": "replace_user"})) == []
+    finally:
+        db.delete_col()
+
+
 @pytest.mark.parametrize("metric", ["cosine", "l2"])
 def test_vector_metric_exact_match_returns_first(metric):
     db = _new_db(vector_metric=metric)

@@ -1813,6 +1813,32 @@ def test_create_col_updates_distance_choice():
     assert db.vector_metric == "l2"
 
 
+def test_create_col_vector_size_override_drives_high_dim_index_settings():
+    db, *_ = make_gaussdb(embedding_model_dims=3)
+    cur_cm = MagicMock()
+    cur = MagicMock()
+    cur_cm.__enter__.return_value = cur
+    cur.fetchone.return_value = ("64MB",)
+    with patch.object(db, "_get_cursor", return_value=cur_cm), patch.object(
+        db, "_run_with_retry", side_effect=lambda op, func: func()
+    ), patch.object(db, "_ensure_schema"):
+        db.create_col(vector_size=2048)
+
+    sqls = executed_sql(cur)
+    assert "FLOATVECTOR(2048)" in sqls
+    assert "SET LOCAL maintenance_work_mem = %s" in sqls
+    assert "USING gsdiskann (vector COSINE)" in sqls
+    assert "WITH (enable_vector_copy=false, subgraph_count=1)" in sqls
+    cur.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("2GB",))
+
+
+def test_create_col_vector_size_override_revalidates_static_limits():
+    db, *_ = make_gaussdb(deployment_mode="distributed", embedding_model_dims=512)
+
+    with pytest.raises(ValueError, match="distributed mode only supports"):
+        db.create_col(vector_size=2048)
+
+
 def test_set_vector_index_maintenance_work_mem_handles_none_and_unparsed_target():
     db, *_ = make_gaussdb()
     cur = MagicMock()

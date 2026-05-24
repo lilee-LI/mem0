@@ -462,8 +462,20 @@ class GaussDB(VectorStoreBase):
     def create_col(self, vector_size: int = None, distance: str = None) -> None:
         table = self.table_name
         dims = self.embedding_model_dims if vector_size is None else self._validate_positive_int(vector_size, "vector_size")
+        effective_metric = self.vector_metric
         if distance:
-            self.vector_metric = self._validate_choice(distance.lower(), "distance", {"cosine", "l2"})
+            effective_metric = self._validate_choice(distance.lower(), "distance", {"cosine", "l2"})
+        validate_gaussdb_static_options(
+            embedding_model_dims=dims,
+            minconn=self.minconn,
+            maxconn=self.maxconn,
+            schema_name=self.schema_name,
+            deployment_mode=self.deployment_mode,
+            vector_index_type=self.vector_index_type,
+            vector_metric=effective_metric,
+        )
+        if distance:
+            self.vector_metric = effective_metric
 
         def op():
             with self._get_cursor(commit=True) as cur:
@@ -484,14 +496,14 @@ class GaussDB(VectorStoreBase):
                     ) {self._create_table_suffix_sql("id")}
                     """
                 )
-                self._ensure_indexes(cur, table)
+                self._ensure_indexes(cur, table, embedding_dims=dims)
 
         return self._run_with_retry("create_col", op)
 
-    def _create_vector_index(self, cur, table: str):
+    def _create_vector_index(self, cur, table: str, embedding_dims: Optional[int] = None):
         index_name = self._quote_identifier(self._index_name(self.collection_name, "vector_idx"))
-        self._set_vector_index_maintenance_work_mem(cur)
-        with_clause = self._vector_index_with_clause()
+        self._set_vector_index_maintenance_work_mem(cur, embedding_dims=embedding_dims)
+        with_clause = self._vector_index_with_clause(embedding_dims=embedding_dims)
         cur.execute(
             f"""
             CREATE INDEX IF NOT EXISTS {index_name}
@@ -501,15 +513,17 @@ class GaussDB(VectorStoreBase):
             """
         )
 
-    def _vector_index_with_clause(self) -> str:
+    def _vector_index_with_clause(self, embedding_dims: Optional[int] = None) -> str:
         """Build WITH clause for vector index. High-dim GsDiskANN needs enable_vector_copy=false + subgraph_count>0."""
-        if self.vector_index_type == "gsdiskann" and self.embedding_model_dims > 1024:
+        dims = self.embedding_model_dims if embedding_dims is None else embedding_dims
+        if self.vector_index_type == "gsdiskann" and dims > 1024:
             return f"WITH (enable_vector_copy=false, subgraph_count={self.gsdiskann_subgraph_count})"
         return ""
 
-    def _set_vector_index_maintenance_work_mem(self, cur):
+    def _set_vector_index_maintenance_work_mem(self, cur, embedding_dims: Optional[int] = None):
+        dims = self.embedding_model_dims if embedding_dims is None else embedding_dims
         target_mem = self.vector_index_maintenance_work_mem
-        if self.embedding_model_dims > 1024 and target_mem == "256MB":
+        if dims > 1024 and target_mem == "256MB":
             target_mem = "2GB"
         if not target_mem:
             return
@@ -602,8 +616,8 @@ class GaussDB(VectorStoreBase):
                 self._increment_metric("gaussdb_fallback_count")
                 logger.warning("Filter index creation failed for key %s; continuing without this index: %s", safe_key, exc)
 
-    def _ensure_indexes(self, cur, table: str):
-        self._create_vector_index(cur, table)
+    def _ensure_indexes(self, cur, table: str, embedding_dims: Optional[int] = None):
+        self._create_vector_index(cur, table, embedding_dims=embedding_dims)
         if self.bm25_enabled:
             self._create_bm25_index(cur, table)
         self._create_filter_indexes(cur, table)

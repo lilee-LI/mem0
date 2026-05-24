@@ -183,7 +183,6 @@ class GaussDB(VectorStoreBase):
 
         self._schema_prefix = f'"{self.schema_name}".'
         self.table_name = f'{self._schema_prefix}{self._quote_identifier(self.collection_name)}'
-        self.schema_meta_table_name = f'{self._schema_prefix}{self._quote_identifier(f"{self.collection_name}_schema_meta")}'
 
         self.connection_pool = self._create_connection_pool()
 
@@ -426,14 +425,28 @@ class GaussDB(VectorStoreBase):
     def _vector_literal(vector: Sequence[float]) -> str:
         return "[" + ",".join(str(float(value)) for value in vector) + "]"
 
-    def _ensure_schema(self, cur) -> None:
-        """Create the target schema if it does not already exist (GaussDB lacks IF NOT EXISTS for CREATE SCHEMA)."""
+    def _schema_exists(self, cur) -> bool:
         cur.execute(
             "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = %s",
             (self.schema_name,),
         )
-        if cur.fetchone()[0] == 0:
+        return bool(cur.fetchone()[0])
+
+    def _ensure_schema(self, cur) -> None:
+        """Create the target schema if needed, tolerating concurrent creation races."""
+        if self._schema_exists(cur):
+            return
+
+        savepoint = "mem0_create_schema"
+        cur.execute(f"SAVEPOINT {savepoint}")
+        try:
             cur.execute(f'CREATE SCHEMA "{self.schema_name}"')
+        except Exception:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            if not self._schema_exists(cur):
+                cur.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+        cur.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     def create_col(self, vector_size: int = None, distance: str = None) -> None:
         table = self.table_name
@@ -454,44 +467,15 @@ class GaussDB(VectorStoreBase):
                         text_lemmatized TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        schema_version INTEGER DEFAULT 1,
                         user_id VARCHAR(128),
                         agent_id VARCHAR(128),
                         run_id VARCHAR(128)
                     ) {self._create_table_suffix_sql("id")}
                     """
                 )
-                self._create_schema_meta(cur)
-                self._upsert_schema_meta(cur, self.collection_name, 1)
                 self._ensure_indexes(cur, table)
 
         return self._run_with_retry("create_col", op)
-
-    def _create_schema_meta(self, cur):
-        cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self.schema_meta_table_name} (
-                collection_name VARCHAR(128) PRIMARY KEY,
-                schema_version INTEGER NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) {self._create_table_suffix_sql("collection_name")}
-            """
-        )
-
-    def _upsert_schema_meta(self, cur, collection_name: str, schema_version: int):
-        cur.execute(
-            f"""
-            MERGE INTO {self.schema_meta_table_name} AS target
-            USING (VALUES (%s, %s)) AS src (collection_name, schema_version)
-            ON (target.collection_name = src.collection_name)
-            WHEN MATCHED THEN
-                UPDATE SET schema_version = src.schema_version, updated_at = CURRENT_TIMESTAMP
-            WHEN NOT MATCHED THEN
-                INSERT (collection_name, schema_version, updated_at)
-                VALUES (src.collection_name, src.schema_version, CURRENT_TIMESTAMP)
-            """,
-            (collection_name, schema_version),
-        )
 
     def _create_vector_index(self, cur, table: str):
         index_name = self._quote_identifier(self._index_name(self.collection_name, "vector_idx"))
@@ -626,7 +610,7 @@ class GaussDB(VectorStoreBase):
         ]
         if not rows:
             return None
-        columns = ["id", "vector", "payload", "memory", "text_lemmatized", "schema_version", *self._redundant_scope_columns]
+        columns = ["id", "vector", "payload", "memory", "text_lemmatized", *self._redundant_scope_columns]
         update_columns = [column for column in columns if column != "id"]
         update_set_sql = ", ".join(
             f"{self._quote_identifier(column)} = src.{self._quote_identifier(column)}" for column in update_columns
@@ -665,7 +649,6 @@ class GaussDB(VectorStoreBase):
             "id": self._id_column_sql(),
             "vector": "FLOATVECTOR",
             "payload": self._payload_column_sql(),
-            "schema_version": "INTEGER",
             "user_id": "VARCHAR(128)",
             "agent_id": "VARCHAR(128)",
             "run_id": "VARCHAR(128)",
@@ -683,7 +666,6 @@ class GaussDB(VectorStoreBase):
             self._payload_value(payload),
             memory,
             text_lemmatized,
-            1,
         ]
         row.extend(payload.get(key) for key in self._redundant_scope_columns)
         return tuple(row)
@@ -839,11 +821,7 @@ class GaussDB(VectorStoreBase):
                     (self.schema_name,),
                 )
                 rows = cur.fetchall()
-            return [
-                row[0]
-                for row in rows
-                if not str(row[0]).endswith("_schema_meta")
-            ]
+            return [row[0] for row in rows]
 
         return self._run_with_retry("list_cols", op)
 
@@ -851,7 +829,6 @@ class GaussDB(VectorStoreBase):
         def op():
             with self._get_cursor(commit=True) as cur:
                 cur.execute(f"DROP TABLE IF EXISTS {self.table_name}")
-                cur.execute(f"DROP TABLE IF EXISTS {self.schema_meta_table_name}")
 
         return self._run_with_retry("delete_col", op)
 
@@ -860,7 +837,6 @@ class GaussDB(VectorStoreBase):
             with self._get_cursor() as cur:
                 cur.execute(f"SELECT COUNT(*) FROM {self.table_name}")
                 row_count = cur.fetchone()[0]
-                schema_version = self._read_schema_version(cur)
                 cur.execute(
                     """
                     SELECT indexname
@@ -876,7 +852,6 @@ class GaussDB(VectorStoreBase):
                 "schema_name": self.schema_name,
                 "count": row_count,
                 "dimension": self.embedding_model_dims,
-                "schema_version": schema_version,
                 "metadata_column_mode": self.metadata_column_mode,
                 "payload_storage_mode": self.payload_storage_mode,
                 "filter_storage_mode": self.filter_storage_mode,
@@ -889,31 +864,6 @@ class GaussDB(VectorStoreBase):
             }
 
         return self._run_with_retry("col_info", op)
-
-    def _read_schema_version(self, cur) -> int:
-        cur.execute(
-            """
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = %s AND table_name = %s
-            )
-            """,
-            (self.schema_name, f"{self.collection_name}_schema_meta"),
-        )
-        if not cur.fetchone()[0]:
-            return 1
-
-        cur.execute(
-            f"""
-            SELECT schema_version
-            FROM {self.schema_meta_table_name}
-            WHERE collection_name = %s
-            """,
-            (self.collection_name,),
-        )
-        row = cur.fetchone()
-        return int(row[0]) if row else 1
 
     def list(self, filters: Optional[dict] = None, top_k: Optional[int] = 100) -> List[List[OutputData]]:
         where_clause, params = self._build_where_clause(filters)

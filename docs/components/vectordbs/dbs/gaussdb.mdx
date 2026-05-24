@@ -120,9 +120,15 @@ For direct provider writes, treat `payload` as the source of truth for scope val
 
 - `insert()` uses upsert semantics for an existing `id`
 - `update(payload=...)` replaces the stored payload for that row
-- if the new payload omits `user_id`, `agent_id`, or `run_id`, the corresponding stored scope values are cleared as part of that full-replace behavior
+- the provider stores `user_id`, `agent_id`, and `run_id` both in `payload` and in redundant scope columns for filtering/indexing
+- if the new payload omits `user_id`, `agent_id`, or `run_id`, both the JSONB payload and the redundant scope columns are cleared for those fields as part of that full-replace behavior
 
-If you want session identifiers preserved automatically on ordinary memory edits, use the higher-level `Memory.update()` path instead of calling the provider directly.
+This is intentionally different from the higher-level `Memory.update()` path. `Memory.update()` fetches the existing memory first and preserves session identifiers such as `user_id`, `agent_id`, and `run_id` unless the caller explicitly overrides them before delegating to the provider.
+
+In short:
+
+- direct `GaussDB` provider writes: full replace
+- higher-level `Memory.update()`: preserve session/scope identifiers by default
 
 Valid positive scope examples:
 

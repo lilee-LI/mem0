@@ -1792,10 +1792,9 @@ class TestCollectionNameBoundary:
     def test_max_length_collection_name(self):
         """Collection name at max usable length should work.
 
-        The identifier limit is 63 chars, but GaussDB appends '_schema_meta'
-        (12 chars) internally, so the effective max collection name is 51 chars.
+        Collection names can use the normal 63-character identifier limit.
         """
-        long_name = "a" * 51
+        long_name = "a" * 63
         db = _new_db(prefix=None, collection_name=long_name)
         try:
             vid = _uuid(4001)
@@ -4621,14 +4620,12 @@ def test_collection_operations_schema_info_analyze_reset_and_list_cols():
         info = db.col_info()
         assert info["name"] == collection
         assert info["count"] == 2
-        assert info["schema_version"] >= 1
         assert info["payload_storage_mode"] == "jsonb"
         assert info["filter_storage_mode"] == "json_expression"
         assert any("vector_idx" in index for index in info["indexes"])
 
         listed_collections = db.list_cols()
         assert collection in listed_collections
-        assert f"{collection}_schema_meta" not in listed_collections
 
         db.reset()
         assert db.col_info()["count"] == 0

@@ -331,7 +331,6 @@ def test_distributed_create_col_generates_hash_distribution_clauses():
     assert db.deployment_mode == "distributed"
     assert db.distribution_mode == "hash"
     assert 'DISTRIBUTE BY HASH ("id")' in sql
-    assert 'DISTRIBUTE BY HASH ("collection_name")' in sql
 
 
 def test_set_vector_index_maintenance_work_mem_skips_when_current_is_higher():
@@ -472,7 +471,7 @@ def test_insert_uses_merge_into_and_vector_cast():
     assert "%s::FLOATVECTOR" in sql
     assert merge_args[1] == "[0.1,0.2,0.3]"
     assert merge_args[3] == "hello"
-    assert merge_args[6] == "u1"
+    assert merge_args[5] == "u1"
 
 
 def test_insert_many_rows_uses_single_merge_statement():
@@ -495,7 +494,7 @@ def test_insert_many_rows_uses_single_merge_statement():
     calls = mock_cursor.execute.call_args_list
     assert len(calls) == 1
     assert "MERGE INTO" in str(calls[0].args[0])
-    assert len(calls[0].args[1]) == 27
+    assert len(calls[0].args[1]) == 24
 
 
 def test_insert_raises_on_mismatched_lengths():
@@ -756,7 +755,6 @@ def test_constructor_accepts_custom_schema_and_uses_qualified_names():
 
     assert db.schema_name == "mem0_app"
     assert db.table_name == '"mem0_app"."test_collection"'
-    assert db.schema_meta_table_name == '"mem0_app"."test_collection_schema_meta"'
 
 
 @pytest.mark.parametrize(
@@ -1042,33 +1040,6 @@ def test_transaction_rollback_on_error():
 
 
 # ============================================================
-# _upsert_schema_meta uses MERGE INTO
-# ============================================================
-
-
-def test_upsert_schema_meta_uses_merge_into():
-    db, _, _, mock_cursor = make_gaussdb()
-
-    db._upsert_schema_meta(mock_cursor, "test_collection", 3)
-
-    sql = executed_sql(mock_cursor)
-    assert "MERGE INTO" in sql
-    assert "WHEN MATCHED THEN" in sql
-    assert "WHEN NOT MATCHED THEN" in sql
-
-
-def test_upsert_schema_meta_passes_correct_params():
-    db, _, _, mock_cursor = make_gaussdb()
-
-    db._upsert_schema_meta(mock_cursor, "my_collection", 5)
-
-    call_args = mock_cursor.execute.call_args
-    params = call_args[0][1]
-    assert params == ("my_collection", 5)
-
-
-
-# ============================================================
 # Delete / List / Col info tests
 # ============================================================
 
@@ -1103,30 +1074,17 @@ def test_list_top_k_zero_is_preserved():
     assert mock_cursor.execute.call_args.args[1][-1] == 0
 
 
-def test_col_info_reads_schema_version():
+def test_col_info_reads_indexes_and_capabilities():
     db, _, _, mock_cursor = make_gaussdb()
-    mock_cursor.fetchone.side_effect = [(3,), (True,), (7,)]
+    mock_cursor.fetchone.side_effect = [(3,)]
     mock_cursor.fetchall.return_value = [("test_collection_vector_idx",), ("test_collection_bm25_idx",)]
 
     info = db.col_info()
 
-    sql = executed_sql(mock_cursor)
-    assert "information_schema.tables" in sql
     assert info["count"] == 3
-    assert info["schema_version"] == 7
     assert info["deployment_mode"] == "centralized"
     assert info["distribution_mode"] == "none"
     assert info["indexes"] == ["test_collection_vector_idx", "test_collection_bm25_idx"]
-
-
-def test_col_info_defaults_schema_version_when_meta_table_missing():
-    db, _, _, mock_cursor = make_gaussdb()
-    mock_cursor.fetchone.side_effect = [(3,), (False,)]
-    mock_cursor.fetchall.return_value = []
-
-    info = db.col_info()
-
-    assert info["schema_version"] == 1
 
 
 # ============================================================
@@ -1442,13 +1400,15 @@ def test_parse_memory_setting_bytes(value, expected):
 def test_ensure_schema_creates_when_missing():
     db, *_ = make_gaussdb()
     cur = MagicMock()
-    cur.fetchone.return_value = (0,)
+    cur.fetchone.side_effect = [(0,)]
 
     db._ensure_schema(cur)
 
     sqls = executed_sql(cur)
     assert "information_schema.schemata" in sqls
+    assert "SAVEPOINT mem0_create_schema" in sqls
     assert f'CREATE SCHEMA "{db.schema_name}"' in sqls
+    assert "RELEASE SAVEPOINT mem0_create_schema" in sqls
 
 
 def test_ensure_schema_skips_when_present():
@@ -1460,6 +1420,44 @@ def test_ensure_schema_skips_when_present():
     assert "CREATE SCHEMA" not in executed_sql(cur)
 
 
+def test_ensure_schema_tolerates_concurrent_create_race():
+    db, *_ = make_gaussdb()
+    cur = MagicMock()
+
+    def execute_side_effect(sql, *args):
+        if str(sql) == f'CREATE SCHEMA "{db.schema_name}"':
+            raise Exception("schema already exists")
+
+    cur.execute.side_effect = execute_side_effect
+    cur.fetchone.side_effect = [(0,), (1,)]
+
+    db._ensure_schema(cur)
+
+    sqls = executed_sql(cur)
+    assert "SAVEPOINT mem0_create_schema" in sqls
+    assert f'CREATE SCHEMA "{db.schema_name}"' in sqls
+    assert "ROLLBACK TO SAVEPOINT mem0_create_schema" in sqls
+    assert "RELEASE SAVEPOINT mem0_create_schema" in sqls
+
+
+def test_ensure_schema_reraises_non_race_create_failure():
+    db, *_ = make_gaussdb()
+    cur = MagicMock()
+
+    def execute_side_effect(sql, *args):
+        if str(sql) == f'CREATE SCHEMA "{db.schema_name}"':
+            raise Exception("permission denied")
+
+    cur.execute.side_effect = execute_side_effect
+    cur.fetchone.side_effect = [(0,), (0,)]
+
+    with pytest.raises(Exception, match="permission denied"):
+        db._ensure_schema(cur)
+
+    sqls = executed_sql(cur)
+    assert "ROLLBACK TO SAVEPOINT mem0_create_schema" in sqls
+
+
 def test_create_col_builds_table_and_indexes():
     db, *_ = make_gaussdb()
     cur_cm = MagicMock()
@@ -1467,34 +1465,22 @@ def test_create_col_builds_table_and_indexes():
     cur_cm.__enter__.return_value = cur
     with patch.object(db, "_get_cursor", return_value=cur_cm), patch.object(
         db, "_run_with_retry", side_effect=lambda op, func: func()
-    ), patch.object(db, "_ensure_schema") as ensure_schema, patch.object(
-        db, "_create_schema_meta"
-    ) as create_meta, patch.object(
-        db, "_upsert_schema_meta"
-    ) as upsert_meta, patch.object(
-        db, "_ensure_indexes"
-    ) as ensure_indexes:
+    ), patch.object(db, "_ensure_schema") as ensure_schema, patch.object(db, "_ensure_indexes") as ensure_indexes:
         db.create_col()
 
     sqls = executed_sql(cur)
     assert "CREATE TABLE IF NOT EXISTS" in sqls
     ensure_schema.assert_called_once()
-    create_meta.assert_called_once_with(cur)
-    upsert_meta.assert_called_once()
     ensure_indexes.assert_called_once()
 
 
-def test_create_schema_meta_upsert_and_vector_index_emit_expected_sql():
+def test_create_vector_index_emits_expected_sql():
     db, *_ = make_gaussdb()
     cur = MagicMock()
 
-    db._create_schema_meta(cur)
-    db._upsert_schema_meta(cur, db.collection_name, 1)
     db._create_vector_index(cur, db.table_name)
 
     sqls = executed_sql(cur)
-    assert "CREATE TABLE IF NOT EXISTS" in sqls
-    assert "MERGE INTO" in sqls
     assert "CREATE INDEX IF NOT EXISTS" in sqls
 
 
@@ -1576,13 +1562,13 @@ def test_insert_validates_lengths_and_handles_empty_rows():
 
 def test_incoming_values_sql_and_insert_row():
     db, *_ = make_gaussdb()
-    sql = db._incoming_values_sql(["id", "vector", "payload", "memory", "schema_version", "user_id"])
+    sql = db._incoming_values_sql(["id", "vector", "payload", "memory", "user_id"])
     assert "%s::UUID" in sql
     assert "%s::FLOATVECTOR" in sql
     row = db._insert_row([1.0, 2.0], {"memory": "m", "user_id": "u1"}, "id1")
     assert row[0] == "id1"
     assert row[3] == "m"
-    assert row[-3] == "u1"
+    assert row[-3:] == ("u1", None, None)
 
 
 def test_search_keyword_search_and_search_batch_paths():
@@ -1638,36 +1624,25 @@ def test_update_delete_get_list_reset_and_col_helpers():
     cur = MagicMock()
     cur.fetchone.side_effect = [("id1", '{"a":1}'), None, (5,)]
     cur.fetchall.side_effect = [
-        [("table_a",), ("table_a_schema_meta",), ("table_b",)],
+        [("table_a",), ("table_b",)],
         [("idx_a",), ("idx_b",)],
         [("id2", '{"b":2}')],
     ]
     cur_cm.__enter__.return_value = cur
     with patch.object(db, "_get_cursor", return_value=cur_cm), patch.object(
         db, "_run_with_retry", side_effect=lambda op, func: func()
-    ), patch.object(db, "_read_schema_version", return_value=3), patch.object(
-        db, "delete_col"
-    ) as delete_col, patch.object(db, "create_col") as create_col:
+    ), patch.object(db, "delete_col") as delete_col, patch.object(db, "create_col") as create_col:
         db.update("id1", payload={"memory": "m", "user_id": "u1"})
         assert db.get("id1").payload == {"a": 1}
         assert db.get("missing") is None
         assert db.list_cols() == ["table_a", "table_b"]
         db.delete_col()
         info = db.col_info()
-        assert info["schema_version"] == 3
         listed = db.list(filters={"user_id": "u1"})
         assert listed[0][0].payload == {"b": 2}
         db.reset()
         assert delete_col.call_count == 2
         create_col.assert_called_once()
-
-
-def test_read_schema_version_returns_default_when_meta_missing_or_row_missing():
-    db, *_ = make_gaussdb()
-    cur = MagicMock()
-    cur.fetchone.side_effect = [(False,), (True,), None]
-    assert db._read_schema_version(cur) == 1
-    assert db._read_schema_version(cur) == 1
 
 
 def test_build_where_clause_returns_empty_for_missing_filters():
@@ -1787,9 +1762,7 @@ def test_create_col_updates_distance_choice():
     cur_cm.__enter__.return_value = cur
     with patch.object(db, "_get_cursor", return_value=cur_cm), patch.object(
         db, "_run_with_retry", side_effect=lambda op, func: func()
-    ), patch.object(db, "_ensure_schema"), patch.object(db, "_create_schema_meta"), patch.object(
-        db, "_upsert_schema_meta"
-    ), patch.object(db, "_ensure_indexes"):
+    ), patch.object(db, "_ensure_schema"), patch.object(db, "_ensure_indexes"):
         db.create_col(distance="l2")
     assert db.vector_metric == "l2"
 

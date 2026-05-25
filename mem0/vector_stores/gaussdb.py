@@ -667,6 +667,17 @@ class GaussDB(VectorStoreBase):
     def insert(
         self, vectors: List[List[float]], payloads: Optional[List[Dict]] = None, ids: Optional[List[str]] = None
     ) -> None:
+        """
+        Insert or upsert vectors and payloads into the collection.
+
+        Args:
+            vectors (List[List[float]]): Vectors to insert.
+            payloads (List[Dict], optional): Payloads associated with each vector. Defaults to empty payloads.
+            ids (List[str], optional): IDs associated with each vector. Defaults to generated UUIDs.
+
+        Returns:
+            None
+        """
         payloads = [{} for _ in vectors] if payloads is None else payloads
         ids = [str(uuid.uuid4()) for _ in vectors] if ids is None else ids
         if len(vectors) != len(payloads) or len(vectors) != len(ids):
@@ -742,6 +753,18 @@ class GaussDB(VectorStoreBase):
     def search(
         self, query: str, vectors: List[float], top_k: int = 5, filters: Optional[dict] = None
     ) -> List[OutputData]:
+        """
+        Search for vectors similar to the query vector.
+
+        Args:
+            query (str): Query text associated with the search.
+            vectors (List[float]): Query vector.
+            top_k (int, optional): Number of results to return. Defaults to 5.
+            filters (dict, optional): Filters to apply to the search. Defaults to None.
+
+        Returns:
+            List[OutputData]: Search results ordered by vector distance.
+        """
         where_clause, params = self._build_where_clause(filters)
         vector_literal = self._vector_literal(vectors)
 
@@ -769,6 +792,17 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("search", op)
 
     def keyword_search(self, query: str, top_k: int = 5, filters: Optional[dict] = None):
+        """
+        Search using GaussDB BM25 keyword ranking when available.
+
+        Args:
+            query (str): Query text.
+            top_k (int, optional): Number of results to return. Defaults to 5.
+            filters (dict, optional): Filters to apply to the search. Defaults to None.
+
+        Returns:
+            Optional[List[OutputData]]: Keyword search results, or None when BM25 is unavailable.
+        """
         if not self.bm25_enabled:
             return None
         if not query or not query.strip():
@@ -821,6 +855,18 @@ class GaussDB(VectorStoreBase):
         cur.execute("SET LOCAL enable_seqscan = off")
 
     def search_batch(self, queries: list, vectors_list: list, top_k: int = 1, filters: Optional[dict] = None):
+        """
+        Run vector search for multiple query vectors.
+
+        Args:
+            queries (list): Query texts associated with each vector.
+            vectors_list (list): Query vectors.
+            top_k (int, optional): Number of results to return per query. Defaults to 1.
+            filters (dict, optional): Filters to apply to each search. Defaults to None.
+
+        Returns:
+            List[List[OutputData]]: Search results for each query vector.
+        """
         if not vectors_list:
             return []
         if len(queries) != len(vectors_list):
@@ -833,6 +879,15 @@ class GaussDB(VectorStoreBase):
         ]
 
     def delete(self, vector_id: str) -> None:
+        """
+        Delete a vector by ID.
+
+        Args:
+            vector_id (str): ID of the vector to delete.
+
+        Returns:
+            None
+        """
         def op():
             with self._get_cursor(commit=True) as cur:
                 cur.execute(f"DELETE FROM {self.table_name} WHERE id = %s", (vector_id,))
@@ -840,6 +895,17 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("delete", op)
 
     def update(self, vector_id: str, vector: Optional[List[float]] = None, payload: Optional[dict] = None) -> None:
+        """
+        Update a vector and/or replace its payload.
+
+        Args:
+            vector_id (str): ID of the vector to update.
+            vector (List[float], optional): Updated vector. Defaults to None.
+            payload (dict, optional): Replacement payload. Defaults to None.
+
+        Returns:
+            None
+        """
         if vector is None and payload is None:
             return None
 
@@ -879,6 +945,15 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("update", op)
 
     def get(self, vector_id: str) -> Optional[OutputData]:
+        """
+        Retrieve a vector payload by ID.
+
+        Args:
+            vector_id (str): ID of the vector to retrieve.
+
+        Returns:
+            Optional[OutputData]: Retrieved vector payload, or None if the ID does not exist.
+        """
         def op():
             with self._get_cursor() as cur:
                 cur.execute(f"SELECT id, payload FROM {self.table_name} WHERE id = %s", (vector_id,))
@@ -890,6 +965,15 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("get", op)
 
     def list_cols(self) -> List[str]:
+        """
+        List collection tables in the configured schema.
+
+        Args:
+            None
+
+        Returns:
+            List[str]: Collection table names.
+        """
         def op():
             with self._get_cursor() as cur:
                 cur.execute(
@@ -906,6 +990,15 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("list_cols", op)
 
     def delete_col(self) -> None:
+        """
+        Delete the current collection table.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
         def op():
             with self._get_cursor(commit=True) as cur:
                 cur.execute(f"DROP TABLE IF EXISTS {self.table_name}")
@@ -913,6 +1006,15 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("delete_col", op)
 
     def col_info(self) -> Dict[str, Any]:
+        """
+        Return metadata about the current collection.
+
+        Args:
+            None
+
+        Returns:
+            Dict[str, Any]: Collection metadata, row count, and index names.
+        """
         def op():
             with self._get_cursor() as cur:
                 cur.execute(f"SELECT COUNT(*) FROM {self.table_name}")
@@ -946,6 +1048,16 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("col_info", op)
 
     def list(self, filters: Optional[dict] = None, top_k: Optional[int] = 100) -> List[List[OutputData]]:
+        """
+        List vectors from the collection.
+
+        Args:
+            filters (dict, optional): Filters to apply to the list operation. Defaults to None.
+            top_k (int, optional): Maximum number of results to return. Defaults to 100.
+
+        Returns:
+            List[List[OutputData]]: Listed vector payloads.
+        """
         where_clause, params = self._build_where_clause(filters)
         limit = 100 if top_k is None else top_k
 
@@ -967,6 +1079,15 @@ class GaussDB(VectorStoreBase):
         return self._run_with_retry("list", op)
 
     def reset(self) -> None:
+        """
+        Reset the current collection by dropping and recreating it.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
         logger.warning("Resetting GaussDB collection %s", self.collection_name)
         self.delete_col()
         self.create_col(vector_size=self.embedding_model_dims, distance=self.vector_metric)

@@ -729,6 +729,8 @@ class GaussDB(VectorStoreBase):
             "id": self._id_column_sql(),
             "vector": "FLOATVECTOR",
             "payload": self._payload_column_sql(),
+            "memory": "TEXT",
+            "text_lemmatized": "TEXT",
             "user_id": "VARCHAR(128)",
             "agent_id": "VARCHAR(128)",
             "run_id": "VARCHAR(128)",
@@ -1118,7 +1120,7 @@ class GaussDB(VectorStoreBase):
                         params.extend(sub_params)
                 if sub_expressions:
                     joiner = " AND " if normalized_key == "AND" else " OR "
-                    expressions.append(joiner.join(sub_expressions))
+                    expressions.append(f"({joiner.join(sub_expressions)})")
             elif normalized_key == "NOT":
                 if not isinstance(value, list):
                     raise ValueError("NOT filter value must be a list")

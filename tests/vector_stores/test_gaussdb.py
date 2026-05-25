@@ -1702,9 +1702,10 @@ def test_insert_validates_lengths_and_handles_empty_rows():
 
 def test_incoming_values_sql_and_insert_row():
     db, *_ = make_gaussdb()
-    sql = db._incoming_values_sql(["id", "vector", "payload", "memory", "user_id"])
+    sql = db._incoming_values_sql(["id", "vector", "payload", "memory", "text_lemmatized", "user_id"])
     assert "%s::UUID" in sql
     assert "%s::FLOATVECTOR" in sql
+    assert "%s::TEXT" in sql
     row = db._insert_row([1.0, 2.0], {"memory": "m", "user_id": "u1"}, "id1")
     assert row[0] == "id1"
     assert row[3] == "m"
@@ -1756,6 +1757,7 @@ def test_keyword_search_failure_returns_none_and_success_applies_settings():
         db, "_run_with_retry", side_effect=lambda op, func: func()
     ):
         assert db.keyword_search("probe", filters={"user_id": "u1"}) is None
+        assert db.bm25_enabled is True
 
 
 def test_keyword_search_retries_retryable_errors_and_returns_rows(monkeypatch):
@@ -2011,6 +2013,15 @@ def test_build_filter_expression_skips_empty_subexpressions_and_not_branch():
     expr, params = db._build_filter_expression({"$and": [{"category": "*"}], "$not": [{"category": "*"}]})
     assert expr == ""
     assert params == []
+
+
+def test_build_filter_expression_wraps_or_group_before_top_level_and():
+    db, *_ = make_gaussdb()
+    expr, params = db._build_filter_expression(
+        {"$or": [{"user_id": "alice"}, {"status": "active"}], "agent_id": "bot"}
+    )
+    assert expr == '((\"user_id\" = %s) OR (payload @> %s::JSONB)) AND \"agent_id\" = %s'
+    assert params == ["alice", '{"status":"active"}', "bot"]
 
 
 def test_build_field_filter_covers_scope_ne_nin_contains_and_list_singleton():

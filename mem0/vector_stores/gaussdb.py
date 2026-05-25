@@ -496,7 +496,25 @@ class GaussDB(VectorStoreBase):
                 raise
         cur.execute(f"RELEASE SAVEPOINT {savepoint}")
 
-    def create_col(self, vector_size: int = None, distance: str = None) -> None:
+    def create_col(self, name: Optional[str] = None, vector_size: int = None, distance: str = None) -> None:
+        """Create the configured GaussDB collection and its indexes.
+
+        Args:
+            name: Optional collection name override. GaussDB instances are bound to
+                ``self.collection_name``, so alternate names are rejected.
+            vector_size: Optional vector dimension override for the collection.
+            distance: Optional vector distance metric override (``cosine`` or ``l2``).
+
+        Returns:
+            None.
+        """
+        if name is not None:
+            validated_name = self._validate_identifier(name, "collection_name")
+            if validated_name != self.collection_name:
+                raise ValueError(
+                    f"GaussDB create_col only supports the configured collection_name {self.collection_name!r}; "
+                    f"got {validated_name!r}"
+                )
         table = self.table_name
         dims = self.embedding_model_dims if vector_size is None else self._validate_positive_int(vector_size, "vector_size")
         effective_metric = self.vector_metric

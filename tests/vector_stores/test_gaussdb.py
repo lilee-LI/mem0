@@ -336,13 +336,15 @@ def test_create_col_generates_ustore_vector_bm25_and_filter_indexes():
     mock_conn.commit.assert_called()
 
 
-def test_create_col_does_not_accept_alternate_collection_name():
+def test_create_col_rejects_alternate_collection_name_but_accepts_matching_name():
     db, _, _, _ = make_gaussdb()
 
-    with pytest.raises(TypeError):
+    db.create_col(name=db.collection_name)
+
+    with pytest.raises(ValueError, match="only supports the configured collection_name"):
         db.create_col(name="other_collection")
 
-    with pytest.raises(ValueError, match="vector_size must be >= 1"):
+    with pytest.raises(ValueError, match="only supports the configured collection_name"):
         db.create_col("other_collection")
 
 

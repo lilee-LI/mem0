@@ -49,6 +49,8 @@ _BM25_UNAVAILABLE_ERROR_FRAGMENTS = (
     "no bm25 index is used",
     "gs_bm25_distance_text is called",
 )
+_DEFAULT_VECTOR_INDEX_MAINTENANCE_WORK_MEM = "256MB"
+_HIGH_DIM_VECTOR_INDEX_MAINTENANCE_WORK_MEM = "2GB"
 
 
 def _first_env(*names: str) -> Optional[str]:
@@ -106,6 +108,7 @@ class GaussDB(VectorStoreBase):
         minconn: int = 1,
         maxconn: int = 5,
         insert_batch_size: int = 2000,
+        vector_index_maintenance_work_mem: Optional[str] = None,
         sslmode: Optional[str] = None,
         sslrootcert: Optional[str] = None,
         schema_name: str = "public",
@@ -134,6 +137,7 @@ class GaussDB(VectorStoreBase):
         self.minconn = minconn
         self.maxconn = maxconn
         self.insert_batch_size = insert_batch_size
+        self.vector_index_maintenance_work_mem = vector_index_maintenance_work_mem
         self.sslmode = sslmode
         self.sslrootcert = sslrootcert
         self.deployment_mode = str(deployment_mode).lower()
@@ -159,7 +163,6 @@ class GaussDB(VectorStoreBase):
         self.table_storage = "ustore"
         self.id_column_type = "uuid"
         self.gsdiskann_subgraph_count = 1
-        self.vector_index_maintenance_work_mem = "256MB"
         self.bm25_enabled = self.deployment_mode != "distributed"
         self.bm25_ranking_metric = 0
         self.bm25_ncandidates = 128
@@ -261,7 +264,10 @@ class GaussDB(VectorStoreBase):
         if ThreadedConnectionPool is None or make_dsn is None:
             raise ImportError(
                 "GaussDB vector store requires the GaussDB official psycopg2 driver package. "
-                "Install the GaussDB psycopg2 wheel provided for your database version."
+                "This driver is distributed by GaussDB and is not available on PyPI, so mem0 cannot "
+                "declare it in pyproject.toml. Download the psycopg2 wheel that matches your GaussDB "
+                "database version from Huawei Cloud GaussDB documentation or your GaussDB software "
+                "package, then install it with: pip install /path/to/gaussdb_psycopg2.whl"
             )
 
         dsn = self._build_dsn()
@@ -454,6 +460,11 @@ class GaussDB(VectorStoreBase):
 
     @staticmethod
     def _vector_literal(vector: Sequence[float]) -> str:
+        # Client-side FLOATVECTOR literal. Avoids psycopg2's Latin-1 encoding issue
+        # (see _payload_value rationale). The server-side ::FLOATVECTOR cast parses
+        # this string format. GaussDB requires dimensions > 0.
+        if not vector:
+            raise ValueError("Vector must have at least one dimension; got empty vector")
         parts = []
         for index, value in enumerate(vector):
             numeric = float(value)
@@ -550,8 +561,12 @@ class GaussDB(VectorStoreBase):
     def _set_vector_index_maintenance_work_mem(self, cur, embedding_dims: Optional[int] = None):
         dims = self.embedding_model_dims if embedding_dims is None else embedding_dims
         target_mem = self.vector_index_maintenance_work_mem
-        if dims > 1024 and target_mem == "256MB":
-            target_mem = "2GB"
+        if target_mem is None:
+            target_mem = (
+                _HIGH_DIM_VECTOR_INDEX_MAINTENANCE_WORK_MEM
+                if dims > 1024
+                else _DEFAULT_VECTOR_INDEX_MAINTENANCE_WORK_MEM
+            )
         if not target_mem:
             return
 
@@ -798,6 +813,9 @@ class GaussDB(VectorStoreBase):
         return f"/*+ indexscan({table_name} {index_name}) */"
 
     def _apply_bm25_settings(self, cur):
+        # int() coercion guarantees these are numeric, so f-string interpolation
+        # is safe against injection. SET LOCAL does not accept %s parameter binding
+        # in GaussDB's psycopg2 driver; the value must be embedded in the statement.
         cur.execute(f"SET LOCAL bm25_ranking_metric = {int(self.bm25_ranking_metric)}")
         cur.execute(f"SET LOCAL bm25_ncandidates = {int(self.bm25_ncandidates)}")
         cur.execute("SET LOCAL enable_seqscan = off")
@@ -835,6 +853,12 @@ class GaussDB(VectorStoreBase):
             text_lemmatized = payload.get("text_lemmatized") or memory
             set_clauses.extend([f"payload = %s::{self._payload_column_sql()}", "memory = %s", "text_lemmatized = %s"])
             params.extend([self._payload_value(payload), memory, text_lemmatized])
+            # Scope columns are set from payload.get(key), which returns None if the
+            # key is absent. This is a full-replacement update: scope columns that are
+            # not in the payload become NULL. mem0's upper-level code always preserves
+            # scope keys from the existing memory when building the update payload, so
+            # this does not cause data loss in normal mem0 usage. Direct callers who
+            # omit scope keys should be aware that missing keys will NULL the column.
             for key in self._redundant_scope_columns:
                 set_clauses.append(f"{self._quote_identifier(key)} = %s")
                 params.append(payload.get(key))

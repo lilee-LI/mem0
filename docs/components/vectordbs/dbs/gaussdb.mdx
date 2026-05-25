@@ -76,6 +76,7 @@ config = {
 | `schema_name` | Optional advanced schema name | `public` |
 | `minconn` / `maxconn` | Connection pool bounds | `1` / `5` |
 | `insert_batch_size` | Maximum rows per `MERGE INTO` batch during provider inserts | `2000` |
+| `vector_index_maintenance_work_mem` | Optional transaction-local memory target used only while creating vector indexes, for example `"256MB"` or `"2GB"` | `None` |
 | `auto_create` | Create collection automatically on init | `True` |
 | `sslmode` / `sslrootcert` | Optional SSL settings | `None` |
 
@@ -102,12 +103,22 @@ Before using the provider, make sure:
 
 For BM25 `keyword_search`, treat the UTF8 requirement as part of the supported capability boundary, not just a generic recommendation. GaussDB documents BM25 tokenization support for UTF-8 encoded Chinese and English text, so centralized keyword search should be positioned as a UTF8 Chinese/English feature rather than a general multilingual text-search promise.
 
-For vector index creation, the provider raises `maintenance_work_mem` only for the index-build transaction:
+For vector index creation, the provider adjusts `maintenance_work_mem` only for the index-build transaction:
 
-- default vector-index build target: `256MB`
-- high-dimensional `gsdiskann` (`>1024` dims): auto-escalates to `2GB`
+- if `vector_index_maintenance_work_mem` is set, that value becomes the transaction-local target
+- if it is not set, the provider uses an internal default strategy
+  - regular vector index builds: `256MB`
+  - high-dimensional `gsdiskann` (`>1024` dims): `2GB`
+- if the database session already reports a higher `maintenance_work_mem`, the provider does not lower it
 
-If index creation still fails because `maintenance_work_mem` is too small, the operation fails loudly. Increase `maintenance_work_mem` on the database side and retry the index build.
+Recommended user-facing formats are memory strings such as:
+
+- `"256MB"`
+- `"512MB"`
+- `"1GB"`
+- `"2GB"`
+
+If index creation still fails because `maintenance_work_mem` is too small, the operation fails loudly. Increase the configured value or the database-side setting and retry the index build.
 
 ## Scoped filtering
 

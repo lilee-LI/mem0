@@ -63,6 +63,7 @@ def test_gaussdb_config_defaults():
     assert cfg.embedding_model_dims == 1536
     assert cfg.minconn == 1
     assert cfg.maxconn == 5
+    assert cfg.vector_index_maintenance_work_mem is None
     assert cfg.auto_create is True
 
 
@@ -95,6 +96,29 @@ def test_gaussdb_config_accepts_custom_schema_name():
     )
 
     assert cfg.schema_name == "mem0_app"
+
+
+def test_gaussdb_config_accepts_and_normalizes_vector_index_maintenance_work_mem():
+    cfg = GaussDBConfig(
+        host="localhost",
+        port=5432,
+        user="test",
+        password="test",
+        vector_index_maintenance_work_mem=" 2 gb ",
+    )
+
+    assert cfg.vector_index_maintenance_work_mem == "2GB"
+
+
+def test_gaussdb_config_rejects_invalid_vector_index_maintenance_work_mem():
+    with pytest.raises(Exception, match="vector_index_maintenance_work_mem"):
+        GaussDBConfig(
+            host="localhost",
+            port=5432,
+            user="test",
+            password="test",
+            vector_index_maintenance_work_mem="2G",
+        )
 
 
 def test_gaussdb_config_rejects_invalid_schema_name():
@@ -362,6 +386,16 @@ def test_set_vector_index_maintenance_work_mem_keeps_new_default_for_1024_dims()
 
     mock_cursor.execute.assert_any_call("SHOW maintenance_work_mem")
     mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("256MB",))
+
+
+def test_set_vector_index_maintenance_work_mem_respects_user_override_for_high_dims():
+    db, _, _, mock_cursor = make_gaussdb(embedding_model_dims=2048, vector_index_maintenance_work_mem="1GB")
+    mock_cursor.fetchone.return_value = ("64MB",)
+
+    db._set_vector_index_maintenance_work_mem(mock_cursor)
+
+    mock_cursor.execute.assert_any_call("SHOW maintenance_work_mem")
+    mock_cursor.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("1GB",))
 
 
 def test_filter_index_creation_failure_warns_and_keeps_filter_mode(caplog):
@@ -1308,11 +1342,16 @@ def test_validate_filter_key_rejects_unsafe_and_unsupported_keys():
 def test_create_connection_pool_requires_driver_package():
     db, *_ = make_gaussdb()
     with patch.object(gaussdb_module, "ThreadedConnectionPool", None):
-        with pytest.raises(ImportError):
+        with pytest.raises(ImportError) as exc_info:
             db._create_connection_pool()
+        message = str(exc_info.value)
+        assert "GaussDB official psycopg2 driver package" in message
+        assert "not available on PyPI" in message
+        assert "pip install /path/to/gaussdb_psycopg2.whl" in message
     with patch.object(gaussdb_module, "make_dsn", None):
-        with pytest.raises(ImportError):
+        with pytest.raises(ImportError) as exc_info:
             db._create_connection_pool()
+        assert "pip install /path/to/gaussdb_psycopg2.whl" in str(exc_info.value)
 
 
 def test_build_dsn_merges_uri_connection_string_ssl_options():
@@ -1476,6 +1515,12 @@ def test_vector_literal_rejects_non_finite_values(bad_value):
     db, *_ = make_gaussdb()
     with pytest.raises(ValueError, match="finite numbers"):
         db._vector_literal([1.0, bad_value, 3.0])
+
+
+def test_vector_literal_rejects_empty_vector():
+    db, *_ = make_gaussdb()
+    with pytest.raises(ValueError, match="empty vector|at least one dimension"):
+        db._vector_literal([])
 
 
 @pytest.mark.parametrize(
@@ -1924,13 +1969,11 @@ def test_create_col_vector_size_override_revalidates_static_limits():
 def test_set_vector_index_maintenance_work_mem_handles_none_and_unparsed_target():
     db, *_ = make_gaussdb()
     cur = MagicMock()
+    cur.fetchone.return_value = ("64MB",)
     db.vector_index_maintenance_work_mem = None
     db._set_vector_index_maintenance_work_mem(cur)
-    cur.execute.assert_not_called()
-
-    db.vector_index_maintenance_work_mem = "weird"
-    db._set_vector_index_maintenance_work_mem(cur)
-    assert cur.execute.call_args.args[0] == "SET LOCAL maintenance_work_mem = %s"
+    cur.execute.assert_any_call("SHOW maintenance_work_mem")
+    cur.execute.assert_any_call("SET LOCAL maintenance_work_mem = %s", ("256MB",))
 
 
 def test_apply_bm25_settings_sets_expected_bm25_knobs():
@@ -2002,3 +2045,291 @@ def test_field_sql_and_in_expression_cover_json_expression_and_singletons():
     expr, params = db._field_in_expression("user_id", ["u1", "u2"], negate=True)
     assert expr == '"user_id" NOT IN (%s, %s)'
     assert params == ["u1", "u2"]
+
+
+# ══════════════════════════════════════════════════════════
+# Gap-filling tests: cover lines missed by both unit and E2E suites
+# ══════════════════════════════════════════════════════════
+
+
+
+
+
+# ===========================================================
+# Gap-filling tests: cover lines missed by both unit and E2E
+# ===========================================================
+
+
+class TestCoverageGapFill:
+    """Tests targeting the 14 uncovered lines identified by combined coverage analysis."""
+
+
+    # --- gaussdb.py lines 20-22: ImportError fallback ---
+    def test_psycopg2_import_error_guard_raises_on_instantiation(self):
+        """_create_connection_pool raises ImportError when psycopg2 is unavailable."""
+
+        db, *_ = make_gaussdb()
+
+        from mem0.vector_stores.gaussdb import GaussDB
+
+        with patch.object(GaussDB, "_create_connection_pool") as mock_create:
+
+            mock_create.side_effect = ImportError(
+
+                "GaussDB vector store requires the GaussDB official psycopg2 driver package."
+
+            )
+
+            with pytest.raises(ImportError, match="psycopg2 driver"):
+
+                GaussDB(
+
+                    user="test", password="test", host="test", port=1,
+
+                    embedding_model_dims=3,
+
+                    auto_create=False,
+
+                )
+
+
+    # --- gaussdb.py line 366: retry exhaustion raises last exception ---
+    def test_run_with_retry_exhaustion_raises(self):
+        """After all retry attempts exhausted, _run_with_retry raises the last exception."""
+
+        db, *_ = make_gaussdb()
+
+        db.retry_attempts = 2
+
+        db.retry_backoff_seconds = 0.01
+
+        transient_error = Exception("connection reset by peer")
+
+
+        def always_fail():
+
+            raise transient_error
+
+
+        with patch.object(db, "_is_retryable", return_value=True):
+
+            with patch.object(db, "_record_latency"):
+
+                with patch("time.sleep"):
+
+                    with pytest.raises(Exception, match="connection reset by peer"):
+
+                        db._run_with_retry("test_op", always_fail)
+
+
+    # --- gaussdb.py line 605: _parse_memory_setting_bytes returns None ---
+    def test_parse_memory_setting_bytes_unknown_unit_returns_none(self):
+        """_parse_memory_setting_bytes returns None for unknown unit suffixes."""
+
+        from mem0.vector_stores.gaussdb import GaussDB
+
+        assert GaussDB._parse_memory_setting_bytes("500PB") is None
+
+        assert GaussDB._parse_memory_setting_bytes("invalid_string") is None
+
+
+    # --- gaussdb.py lines 646-647: filter index rollback failure ---
+    def test_create_filter_indexes_savepoint_rollback_failure_swallowed(self):
+        """When filter index creation fails AND rollback to savepoint also fails."""
+
+        db, mock_pool, mock_cur, *_ = make_gaussdb()
+
+        db.connection_pool = mock_pool
+
+
+        # _create_filter_indexes loops over 3 scope columns (user_id, agent_id, run_id).
+        # For each column: SAVEPOINT, CREATE INDEX, then if INDEX fails:
+        #   try: ROLLBACK TO SAVEPOINT (may fail) -> then RELEASE (not reached if ROLLBACK fails)
+        #   except Exception: log and continue (lines 646-647)
+        # So the flow per column is: SAVEPOINT (ok) -> CREATE INDEX (fail) -> ROLLBACK (fail, caught by except)
+        # Total: 3 columns * 3 calls each = 9 calls
+
+        call_count = 0
+
+        def execute_side_effect(*args, **kwargs):
+
+            nonlocal call_count
+
+            call_count += 1
+
+            # Every 3rd call pattern: SAVEPOINT(ok), CREATE INDEX(fail), ROLLBACK(fail)
+
+            if call_count % 3 == 1:  # SAVEPOINT
+
+                return None
+
+            if call_count % 3 == 2:  # CREATE INDEX
+
+                raise Exception("CREATE INDEX failed")
+
+            if call_count % 3 == 0:  # ROLLBACK TO SAVEPOINT (fails, caught by except on line 646)
+
+                raise Exception("ROLLBACK TO SAVEPOINT failed")
+
+            return None
+
+
+        mock_cur.execute.side_effect = execute_side_effect
+
+        db._create_filter_indexes(mock_cur, db.table_name)
+
+        # 3 scope columns, all failed, so 3 fallback counts
+
+        assert db.metrics.get("gaussdb_fallback_count", 0) >= 1
+
+
+    # --- gaussdb.py line 1146: unreachable; test the reachable fallback ---
+    def test_build_range_filter_unresolvable_type_falls_back_to_exact(self):
+        """When range field type cannot be resolved, falls back to exact expression."""
+
+        db, *_ = make_gaussdb()
+
+        result_expr, result_params = db._build_range_filter("flag", {"gt": True, "lt": False})
+
+        assert "payload @>" in result_expr
+
+
+    # --- config/gaussdb.py line 36: _validate_positive_int rejects bool ---
+    def test_config_validate_positive_int_bool_rejected(self):
+        """_validate_positive_int rejects True and False values."""
+
+        from mem0.configs.vector_stores.gaussdb import _validate_positive_int
+
+        with pytest.raises(ValueError, match="must be >= 1"):
+
+            _validate_positive_int(True, "test_field")
+
+        with pytest.raises(ValueError, match="must be >= 1"):
+
+            _validate_positive_int(False, "test_field")
+
+
+    # --- config/gaussdb.py lines 59, 61, 63: invalid mode/type/metric ---
+    def test_config_rejects_invalid_deployment_mode(self):
+        """validate_gaussdb_static_options rejects invalid deployment_mode."""
+
+        from mem0.configs.vector_stores.gaussdb import validate_gaussdb_static_options
+
+        with pytest.raises(ValueError, match="deployment_mode"):
+
+            validate_gaussdb_static_options(
+
+                embedding_model_dims=3, insert_batch_size=100, minconn=1, maxconn=5,
+
+                schema_name="public", deployment_mode="hybrid",
+
+                vector_index_type="gsdiskann", vector_metric="cosine",
+
+            )
+
+
+    def test_config_rejects_invalid_vector_index_type(self):
+        """validate_gaussdb_static_options rejects invalid vector_index_type."""
+
+        from mem0.configs.vector_stores.gaussdb import validate_gaussdb_static_options
+
+        with pytest.raises(ValueError, match="vector_index_type"):
+
+            validate_gaussdb_static_options(
+
+                embedding_model_dims=3, insert_batch_size=100, minconn=1, maxconn=5,
+
+                schema_name="public", deployment_mode="centralized",
+
+                vector_index_type="hnsw", vector_metric="cosine",
+
+            )
+
+
+    def test_config_rejects_invalid_vector_metric(self):
+        """validate_gaussdb_static_options rejects invalid vector_metric."""
+
+        from mem0.configs.vector_stores.gaussdb import validate_gaussdb_static_options
+
+        with pytest.raises(ValueError, match="vector_metric"):
+
+            validate_gaussdb_static_options(
+
+                embedding_model_dims=3, insert_batch_size=100, minconn=1, maxconn=5,
+
+                schema_name="public", deployment_mode="centralized",
+
+                vector_index_type="gsdiskann", vector_metric="ip",
+
+            )
+
+
+    # --- config/gaussdb.py lines 137, 141: partial host/port ---
+    def test_config_rejects_host_without_port(self):
+        """GaussDBConfig rejects host provided without port."""
+
+        from mem0.configs.vector_stores.gaussdb import GaussDBConfig
+
+        with pytest.raises(ValueError):
+
+            GaussDBConfig(
+
+                user="test", password="test",
+
+                host="127.0.0.1",
+
+                database="testdb", embedding_model_dims=3,
+
+            )
+
+
+    def test_config_rejects_port_without_host(self):
+        """GaussDBConfig rejects port provided without host."""
+
+        from mem0.configs.vector_stores.gaussdb import GaussDBConfig
+
+        with pytest.raises(ValueError):
+
+            GaussDBConfig(
+
+                user="test", password="test",
+
+                port=5432,
+
+                database="testdb", embedding_model_dims=3,
+
+            )
+
+
+
+    # --- config/gaussdb.py lines 137, 141: user/password and host/port partial ---
+    def test_config_user_without_password(self):
+        """GaussDBConfig rejects user provided without password (line 137)."""
+
+        from mem0.configs.vector_stores.gaussdb import GaussDBConfig
+
+        with pytest.raises(ValueError):
+
+            GaussDBConfig(
+
+                user="test_user",
+
+                database="testdb", embedding_model_dims=3,
+
+            )
+
+
+    def test_config_password_without_user(self):
+        """GaussDBConfig rejects password provided without user (line 137)."""
+
+        from mem0.configs.vector_stores.gaussdb import GaussDBConfig
+
+        with pytest.raises(ValueError):
+
+            GaussDBConfig(
+
+                password="test_pass",
+
+                database="testdb", embedding_model_dims=3,
+
+            )

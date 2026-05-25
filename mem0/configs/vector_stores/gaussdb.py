@@ -18,9 +18,11 @@ _ENV_DEFAULTS = {
 }
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+_MEMORY_SETTING_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*$")
 _DEPLOYMENT_MODES = {"centralized", "distributed"}
 _VECTOR_INDEX_TYPES = {"gsdiskann", "gsivfflat"}
 _VECTOR_METRICS = {"cosine", "l2"}
+_MEMORY_UNITS = {"kb", "mb", "gb", "tb"}
 
 
 def _first_env(names: tuple[str, ...]) -> Optional[str]:
@@ -37,6 +39,22 @@ def _validate_positive_int(value: int, field_name: str) -> int:
     if value <= 0:
         raise ValueError(f"{field_name} must be >= 1")
     return value
+
+
+def _normalize_memory_setting(value: Optional[str], field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a memory string like '256MB' or '2GB'")
+    match = _MEMORY_SETTING_RE.match(value)
+    if not match:
+        raise ValueError(f"{field_name} must be a memory string like '256MB' or '2GB'")
+    amount, unit = match.groups()
+    if unit.lower() not in _MEMORY_UNITS:
+        raise ValueError(
+            f"{field_name} unit must be one of {sorted(unit.upper() for unit in _MEMORY_UNITS)}, got {unit!r}"
+        )
+    return f"{amount}{unit.upper()}"
 
 
 def validate_gaussdb_static_options(
@@ -98,6 +116,10 @@ class GaussDBConfig(BaseModel):
     minconn: int = Field(1, description="Minimum number of connections in the pool")
     maxconn: int = Field(5, description="Maximum number of connections in the pool")
     insert_batch_size: int = Field(2000, description="Maximum number of rows per MERGE batch during insert")
+    vector_index_maintenance_work_mem: Optional[str] = Field(
+        None,
+        description="Optional memory target used only during vector index creation, for example '256MB' or '2GB'",
+    )
 
     # Deployment & Vector
     deployment_mode: str = Field(
@@ -143,6 +165,10 @@ class GaussDBConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_values(self):
+        self.vector_index_maintenance_work_mem = _normalize_memory_setting(
+            self.vector_index_maintenance_work_mem,
+            "vector_index_maintenance_work_mem",
+        )
         validate_gaussdb_static_options(
             embedding_model_dims=self.embedding_model_dims,
             insert_batch_size=self.insert_batch_size,
